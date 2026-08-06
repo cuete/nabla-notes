@@ -18,4 +18,5 @@
     <string name="saved">Saved</string>
     <string name="error_loading">Error loading files</string>
     <string name="error_saving">Error saving file</string>
+    <string name="widget_description">Tracker — tap to view tracker.md</string>
 </resources>

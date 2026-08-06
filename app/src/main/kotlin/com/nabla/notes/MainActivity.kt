@@ -8,6 +8,7 @@ import androidx.compose.material3.windowsizeclass.ExperimentalMaterial3WindowSiz
 import androidx.compose.material3.windowsizeclass.WindowWidthSizeClass
 import androidx.compose.material3.windowsizeclass.calculateWindowSizeClass
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -40,15 +41,16 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        val initialNoteJson = intent.getStringExtra("open_note_json")
         setContent {
             NotepadTheme {
                 val windowSizeClass = calculateWindowSizeClass(this)
                 val isExpandedOrMedium = windowSizeClass.widthSizeClass != WindowWidthSizeClass.Compact
 
                 if (isExpandedOrMedium) {
-                    SplitPaneLayout()
+                    SplitPaneLayout(initialNoteJson)
                 } else {
-                    SinglePaneLayout()
+                    SinglePaneLayout(initialNoteJson)
                 }
             }
         }
@@ -58,11 +60,16 @@ class MainActivity : ComponentActivity() {
 // ─── Single-Pane Navigation (phones) ─────────────────────────────────────────
 
 @Composable
-private fun SinglePaneLayout() {
+private fun SinglePaneLayout(initialNoteJson: String? = null) {
     val navController = rememberNavController()
     val gson = Gson()
 
-    NavHost(navController = navController, startDestination = "browser") {
+    val startDestination = if (initialNoteJson != null) {
+        val encoded = URLEncoder.encode(initialNoteJson, StandardCharsets.UTF_8.name())
+        "editor/$encoded"
+    } else "browser"
+
+    NavHost(navController = navController, startDestination = startDestination) {
         composable("browser") {
             val viewModel: BrowserViewModel = hiltViewModel()
             FileBrowserScreen(
@@ -99,10 +106,17 @@ private fun SinglePaneLayout() {
 // ─── Split-Pane Layout (tablets / foldables) ─────────────────────────────────
 
 @Composable
-private fun SplitPaneLayout() {
+private fun SplitPaneLayout(initialNoteJson: String? = null) {
     val browserViewModel: BrowserViewModel = hiltViewModel()
     val selectedFile by browserViewModel.selectedFile.collectAsState()
     val navController = rememberNavController()
+
+    LaunchedEffect(initialNoteJson) {
+        if (initialNoteJson != null) {
+            val noteFile = Gson().fromJson(initialNoteJson, NoteFile::class.java)
+            browserViewModel.selectFile(noteFile)
+        }
+    }
 
     NavHost(navController = navController, startDestination = "main") {
         composable("main") {

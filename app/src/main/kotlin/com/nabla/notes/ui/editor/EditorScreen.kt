@@ -580,16 +580,14 @@ private fun MarkdownPreview(
                                 TextView(ctx).apply {
                                     setPadding(0, 0, 0, 0)
                                     textSize = 15f
-                                    setTextIsSelectable(true)
-                                    // Enable link clicks: without this, URLSpan.onClick() is never
-                                    // called and taps on hyperlinks do nothing.
-                                    movementMethod = LinkMovementMethod.getInstance()
                                 }
                             },
                             update = { textView ->
+                                // Set markdown first so Markwon's spans (including TaskListSpan) are
+                                // applied before setTextIsSelectable re-wraps the buffer. Calling
+                                // setTextIsSelectable before setText loses ReplacementSpan drawables.
                                 markwon.setMarkdown(textView, segment.content)
-                                // Re-apply after Markwon sets text in case it resets the movement method.
-                                // Also re-wrap text as SpannableString so spans survive setTextIsSelectable.
+                                textView.setTextIsSelectable(true)
                                 textView.movementMethod = LinkMovementMethod.getInstance()
                             },
                             modifier = Modifier.fillMaxWidth()

@@ -179,6 +179,18 @@ class MsalManager @Inject constructor(
         app.acquireTokenSilentAsync(params)
     }
 
+    /**
+     * Acquire a token silently only — no interactive fallback.
+     * Used from the widget popup to avoid launching the browser unexpectedly.
+     * Returns failure if the user hasn't signed in or the cache is expired.
+     */
+    suspend fun acquireTokenSilentOnly(): Result<String> {
+        val app = msalApp ?: return Result.failure(IllegalStateException("MSAL not initialized"))
+        val account = getCurrentAccount()
+            ?: return Result.failure(Exception("Not signed in"))
+        return acquireTokenSilent(app, account)
+    }
+
     /** Helper: flat-map Result to avoid nested Results */
     private inline fun <T, R> Result<T>.flatMap(transform: (T) -> Result<R>): Result<R> =
         fold(onSuccess = { transform(it) }, onFailure = { Result.failure(it) })

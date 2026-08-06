@@ -23,6 +23,25 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".ui.tracker.TrackerPopupActivity"
+            android:exported="false"
+            android:theme="@style/Theme.NablaNotes.TrackerPopup"
+            android:taskAffinity=""
+            android:excludeFromRecents="true" />
+
+        <receiver
+            android:name=".widget.TrackerWidget"
+            android:exported="true"
+            android:label="@string/widget_description">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/tracker_widget_info" />
+        </receiver>
+
         <!--
             MSAL redirect URI activity.
             Update android:path with your actual signature hash.
