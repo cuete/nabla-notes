@@ -79,12 +79,16 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import android.graphics.BitmapFactory
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import com.nabla.notes.markdown.countTaskItems
+import com.nabla.notes.markdown.normalizeBareTaskLines
+import com.nabla.notes.markdown.taskListTogglePlugin
 import com.nabla.notes.model.MarkdownAction
 import com.nabla.notes.model.NoteFile
 import com.nabla.notes.viewmodel.EditorUiState
 import com.nabla.notes.viewmodel.EditorViewModel
 import io.noties.markwon.Markwon
 import io.noties.markwon.MarkwonVisitor
+import io.noties.markwon.SoftBreakAddsNewLinePlugin
 import io.noties.markwon.SpannableBuilder
 import io.noties.markwon.ext.strikethrough.StrikethroughPlugin
 import io.noties.markwon.ext.tables.TablePlugin
@@ -95,6 +99,7 @@ import io.noties.markwon.html.MarkwonHtmlRenderer
 import io.noties.markwon.html.TagHandler
 import io.noties.markwon.image.glide.GlideImagesPlugin
 import io.noties.markwon.linkify.LinkifyPlugin
+import java.util.concurrent.atomic.AtomicInteger
 
 // ── Markdown segment model ────────────────────────────────────────────────────
 
@@ -236,6 +241,7 @@ fun EditorScreen(
                             MarkdownPreview(
                                 content = textFieldValue.text,
                                 onSaveToGallery = onSaveToGallery,
+                                onToggleTask = { ordinal -> viewModel.toggleTaskItem(ordinal, activity) },
                                 modifier = Modifier
                                     .weight(1f)
                                     .background(MaterialTheme.colorScheme.surface)
@@ -523,9 +529,11 @@ private fun MarkdownToolbar(
 private fun MarkdownPreview(
     content: String,
     onSaveToGallery: (ByteArray) -> Unit,
+    onToggleTask: (Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val taskCounter = remember { AtomicInteger(0) }
     val markwon = remember {
         Markwon.builder(context)
             .usePlugin(TablePlugin.create(context))
@@ -533,6 +541,8 @@ private fun MarkdownPreview(
             .usePlugin(StrikethroughPlugin.create())
             .usePlugin(LinkifyPlugin.create())
             .usePlugin(GlideImagesPlugin.create(context))
+            .usePlugin(SoftBreakAddsNewLinePlugin.create())
+            .usePlugin(taskListTogglePlugin(taskCounter, onToggleTask))
             .usePlugin(HtmlPlugin.create { plugin ->
                 plugin.addHandler(object : TagHandler() {
                     override fun supportedTags() = listOf("mark")
@@ -565,13 +575,24 @@ private fun MarkdownPreview(
     }
 
     val segments = remember(content) { splitMarkdownSegments(content) }
+    // Ordinal of the first checkbox in each segment, so a shared Markwon instance/plugin can
+    // report task ordinals consistent with countTaskItems/flipTaskCheckbox over the full content.
+    val taskBaseOffsets = remember(segments) {
+        val offsets = IntArray(segments.size)
+        var running = 0
+        segments.forEachIndexed { i, seg ->
+            offsets[i] = running
+            if (seg is MarkdownSegment.Text) running += countTaskItems(seg.content)
+        }
+        offsets
+    }
 
     Column(
         modifier = modifier
             .fillMaxWidth()
             .verticalScroll(rememberScrollState())
     ) {
-        segments.forEach { segment ->
+        segments.forEachIndexed { index, segment ->
             when (segment) {
                 is MarkdownSegment.Text -> {
                     if (segment.content.isNotBlank()) {
@@ -586,7 +607,8 @@ private fun MarkdownPreview(
                                 // Set markdown first so Markwon's spans (including TaskListSpan) are
                                 // applied before setTextIsSelectable re-wraps the buffer. Calling
                                 // setTextIsSelectable before setText loses ReplacementSpan drawables.
-                                markwon.setMarkdown(textView, segment.content)
+                                taskCounter.set(taskBaseOffsets[index])
+                                markwon.setMarkdown(textView, normalizeBareTaskLines(segment.content))
                                 textView.setTextIsSelectable(true)
                                 textView.movementMethod = LinkMovementMethod.getInstance()
                             },

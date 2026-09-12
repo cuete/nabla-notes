@@ -6,6 +6,7 @@ import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.nabla.notes.markdown.flipTaskCheckbox
 import com.nabla.notes.model.MarkdownAction
 import com.nabla.notes.model.NoteFile
 import com.nabla.notes.repository.OneDriveRepository
@@ -167,6 +168,19 @@ class EditorViewModel @Inject constructor(
     fun updateTextFieldValue(value: TextFieldValue, activity: Activity) {
         pushHistory(_textFieldValue.value)
         _textFieldValue.value = value
+        scheduleAutosave(activity)
+    }
+
+    /**
+     * Toggle the [ordinal]-th checkbox (document order, see [countTaskItems]) in the current
+     * content. Used from markdown preview mode, where checkboxes are tap-to-toggle.
+     */
+    fun toggleTaskItem(ordinal: Int, activity: Activity) {
+        val current = _textFieldValue.value
+        val newText = flipTaskCheckbox(current.text, ordinal)
+        if (newText == current.text) return
+        pushHistory(current)
+        _textFieldValue.value = TextFieldValue(newText, current.selection)
         scheduleAutosave(activity)
     }
 

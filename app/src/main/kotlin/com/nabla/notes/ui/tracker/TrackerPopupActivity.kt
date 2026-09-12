@@ -32,6 +32,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -42,6 +43,9 @@ import androidx.compose.ui.viewinterop.AndroidView
 import com.google.gson.Gson
 import com.nabla.notes.MainActivity
 import com.nabla.notes.auth.MsalManager
+import com.nabla.notes.markdown.flipTaskCheckbox
+import com.nabla.notes.markdown.normalizeBareTaskLines
+import com.nabla.notes.markdown.taskListTogglePlugin
 import com.nabla.notes.model.BrowserEntry
 import com.nabla.notes.model.NoteFile
 import com.nabla.notes.repository.OneDriveRepository
@@ -49,11 +53,14 @@ import com.nabla.notes.repository.SettingsRepository
 import com.nabla.notes.ui.theme.NotepadTheme
 import dagger.hilt.android.AndroidEntryPoint
 import io.noties.markwon.Markwon
+import io.noties.markwon.SoftBreakAddsNewLinePlugin
 import io.noties.markwon.ext.strikethrough.StrikethroughPlugin
 import io.noties.markwon.ext.tables.TablePlugin
 import io.noties.markwon.ext.tasklist.TaskListPlugin
 import io.noties.markwon.linkify.LinkifyPlugin
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicInteger
 import javax.inject.Inject
 
 private sealed class TrackerState {
@@ -97,6 +104,23 @@ private fun TrackerBottomSheet(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
     var state by remember { mutableStateOf<TrackerState>(TrackerState.Loading) }
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+
+    // Optimistically flips the ordinal-th checkbox and persists it back to OneDrive.
+    // Best-effort: on failure the UI keeps the toggled state (matches the editor's silent
+    // autosave — no inline error surface for this quick widget-popup interaction).
+    val onToggleTask: (Int) -> Unit = onToggle@{ ordinal ->
+        val readyState = state as? TrackerState.Ready ?: return@onToggle
+        val newContent = flipTaskCheckbox(readyState.content, ordinal)
+        if (newContent == readyState.content) return@onToggle
+        state = readyState.copy(content = newContent)
+        coroutineScope.launch {
+            oneDriveRepository.saveFileContent(readyState.noteFile.id, newContent, activity)
+                .onFailure { e ->
+                    android.util.Log.e("NablaNotes", "Failed to save tracker.md toggle", e)
+                }
+        }
+    }
 
     LaunchedEffect(Unit) {
         msalManager.initialize().onFailure {
@@ -178,7 +202,7 @@ private fun TrackerBottomSheet(
                 CircularProgressIndicator()
             }
 
-            is TrackerState.Ready -> TrackerContent(content = s.content)
+            is TrackerState.Ready -> TrackerContent(content = s.content, onToggleTask = onToggleTask)
 
             is TrackerState.Error -> Text(
                 text = s.message,
@@ -192,14 +216,17 @@ private fun TrackerBottomSheet(
 }
 
 @Composable
-private fun TrackerContent(content: String) {
+private fun TrackerContent(content: String, onToggleTask: (Int) -> Unit) {
     val context = LocalContext.current
+    val taskCounter = remember { AtomicInteger(0) }
     val markwon = remember {
         Markwon.builder(context)
             .usePlugin(TaskListPlugin.create(context))
             .usePlugin(StrikethroughPlugin.create())
             .usePlugin(TablePlugin.create(context))
             .usePlugin(LinkifyPlugin.create())
+            .usePlugin(SoftBreakAddsNewLinePlugin.create())
+            .usePlugin(taskListTogglePlugin(taskCounter, onToggleTask))
             .build()
     }
 
@@ -217,7 +244,8 @@ private fun TrackerContent(content: String) {
                 }
             },
             update = { tv ->
-                markwon.setMarkdown(tv, content)
+                taskCounter.set(0)
+                markwon.setMarkdown(tv, normalizeBareTaskLines(content))
                 tv.setTextIsSelectable(true)
                 tv.movementMethod = LinkMovementMethod.getInstance()
             },
