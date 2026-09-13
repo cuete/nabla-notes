@@ -7,6 +7,9 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.nabla.notes.markdown.flipTaskCheckbox
+import com.nabla.notes.markdown.resolveRelativeMediaLinks
+import com.nabla.notes.model.BrowserEntry
+import com.nabla.notes.model.FileKind
 import com.nabla.notes.model.MarkdownAction
 import com.nabla.notes.model.NoteFile
 import com.nabla.notes.repository.OneDriveRepository
@@ -69,12 +72,25 @@ class EditorViewModel @Inject constructor(
     private val _currentFile = MutableStateFlow<NoteFile?>(null)
     val currentFile: StateFlow<NoteFile?> = _currentFile.asStateFlow()
 
+    /** Images already present in the current file's OneDrive folder (for the insert-photo picker). */
+    private val _folderImages = MutableStateFlow<List<NoteFile>>(emptyList())
+    val folderImages: StateFlow<List<NoteFile>> = _folderImages.asStateFlow()
+
     /** Snapshot of content at last save, used to track unsaved changes. */
     private var savedContent: String = ""
 
     /** Whether the content has unsaved changes. */
     val hasUnsavedChanges: Boolean
         get() = _textFieldValue.value.text != savedContent
+
+    /**
+     * Rewrites relative-path markdown links/images in [content] to resolve against OneDrive,
+     * using the current file's parent folder as the base path. See [resolveRelativeMediaLinks].
+     */
+    suspend fun resolveMediaLinks(content: String, activity: Activity): String {
+        val parentPath = _currentFile.value?.parentPath.orEmpty()
+        return resolveRelativeMediaLinks(content, parentPath, oneDriveRepository, activity)
+    }
 
     // ─── Autosave ────────────────────────────────────────────────────────────────
 
@@ -182,6 +198,92 @@ class EditorViewModel @Inject constructor(
         pushHistory(current)
         _textFieldValue.value = TextFieldValue(newText, current.selection)
         scheduleAutosave(activity)
+    }
+
+    /**
+     * Load the list of images already sitting in the current file's OneDrive folder, for the
+     * "choose from this folder" option in the insert-photo picker.
+     */
+    fun loadFolderImages(activity: Activity) {
+        val file = _currentFile.value ?: return
+        val folderId = file.parentFolderId ?: return
+        viewModelScope.launch {
+            oneDriveRepository.listFolderContents(folderId, file.parentPath.orEmpty(), activity)
+                .onSuccess { entries ->
+                    _folderImages.value = entries
+                        .filterIsInstance<BrowserEntry.File>()
+                        .map { it.note }
+                        .filter { it.kind == FileKind.IMAGE }
+                }
+        }
+    }
+
+    /**
+     * Fetch a small thumbnail's bytes for the insert-photo picker (falls back to full bytes if
+     * no server-generated thumbnail exists yet, e.g. right after upload).
+     */
+    suspend fun downloadImageBytes(fileId: String, activity: Activity): ByteArray? {
+        val thumbnail = oneDriveRepository.downloadThumbnailBytes(fileId, "small", activity)
+        if (thumbnail.isSuccess) return thumbnail.getOrNull()
+        return oneDriveRepository.downloadFileBytes(fileId, activity).getOrNull()
+    }
+
+    /**
+     * Insert `![altText](fileName)` at the current cursor position. [fileName] alone (no path
+     * prefix) resolves relative to the note's own folder — see [resolveRelativePath][com.nabla.notes.markdown.resolveRelativePath].
+     */
+    fun insertImageLink(fileName: String, activity: Activity) {
+        val current = _textFieldValue.value
+        val altText = fileName.substringBeforeLast('.')
+        val insert = "![$altText]($fileName)"
+        val newText = current.text.substring(0, current.selection.start) +
+            insert +
+            current.text.substring(current.selection.end)
+        val newCursor = current.selection.start + insert.length
+        pushHistory(current)
+        _textFieldValue.value = TextFieldValue(newText, TextRange(newCursor))
+        scheduleAutosave(activity)
+    }
+
+    /**
+     * Upload a newly picked/captured photo into the current file's folder, then insert a
+     * relative link to it (using whatever name Graph actually assigned, in case of a rename
+     * conflict — see [OneDriveRepository.uploadFileBytes]).
+     */
+    fun uploadAndInsertPhoto(
+        bytes: ByteArray,
+        mimeType: String,
+        activity: Activity,
+        onDone: (success: Boolean) -> Unit
+    ) {
+        val file = _currentFile.value
+        if (file == null) {
+            onDone(false)
+            return
+        }
+        viewModelScope.launch {
+            val extension = when (mimeType) {
+                "image/png" -> "png"
+                else -> "jpg"
+            }
+            val timestamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US)
+                .format(java.util.Date())
+            val fileName = "Photo_$timestamp.$extension"
+
+            oneDriveRepository.uploadFileBytes(
+                folderPath = file.parentPath.orEmpty(),
+                fileName = fileName,
+                bytes = bytes,
+                mimeType = mimeType,
+                activity = activity
+            ).fold(
+                onSuccess = { uploaded ->
+                    insertImageLink(uploaded.name, activity)
+                    onDone(true)
+                },
+                onFailure = { onDone(false) }
+            )
+        }
     }
 
     /**

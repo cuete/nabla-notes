@@ -127,6 +127,7 @@ class BrowserViewModel @Inject constructor(
 
             oneDriveRepository.listFolderContents(
                 folderId = folderId,
+                folderPath = currentFolderPath(),
                 activity = activity
             ).fold(
                 onSuccess = { entries -> _uiState.value = BrowserUiState.Success(entries) },
@@ -155,6 +156,17 @@ class BrowserViewModel @Inject constructor(
      * Returns true when at the configured root (no subfolder navigation in progress).
      */
     fun isAtRoot(): Boolean = _folderStack.value.isEmpty()
+
+    /**
+     * OneDrive-root-relative path of the folder currently being browsed, combining the
+     * configured root folder path with any subfolder stack navigation.
+     */
+    private fun currentFolderPath(): String {
+        val base = settings.value.folderPath
+        if (_folderStack.value.isEmpty()) return base
+        val subPath = _folderStack.value.joinToString("/") { it.second }
+        return if (base.isBlank()) subPath else "$base/$subPath"
+    }
 
     /**
      * Trigger interactive sign-in then reload files.
@@ -197,19 +209,9 @@ class BrowserViewModel @Inject constructor(
         viewModelScope.launch {
             val extension = if (isMarkdown) ".md" else ".txt"
             val fileName = if (name.endsWith(extension)) name else "$name$extension"
-            val currentSettings = settings.value
-
-            // Build the folder path including any subfolder stack navigation
-            val folderPath = if (_folderStack.value.isEmpty()) {
-                currentSettings.folderPath
-            } else {
-                val subPath = _folderStack.value.joinToString("/") { it.second }
-                if (currentSettings.folderPath.isBlank()) subPath
-                else "${currentSettings.folderPath}/$subPath"
-            }
 
             oneDriveRepository.createFile(
-                folderPath = folderPath,
+                folderPath = currentFolderPath(),
                 fileName = fileName,
                 activity = activity
             ).fold(

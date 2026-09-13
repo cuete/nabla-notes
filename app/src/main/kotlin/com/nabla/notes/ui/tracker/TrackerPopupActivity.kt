@@ -135,9 +135,10 @@ private fun TrackerBottomSheet(
             return@LaunchedEffect
         }
 
-        val folderId = settingsRepository.settings.first().folderId
+        val currentSettings = settingsRepository.settings.first()
+        val folderId = currentSettings.folderId
 
-        val entries = oneDriveRepository.listFolderContents(folderId, activity).getOrNull()
+        val entries = oneDriveRepository.listFolderContents(folderId, currentSettings.folderPath, activity).getOrNull()
         val trackerFile = entries
             ?.filterIsInstance<BrowserEntry.File>()
             ?.find { it.note.name.equals("tracker.md", ignoreCase = true) }

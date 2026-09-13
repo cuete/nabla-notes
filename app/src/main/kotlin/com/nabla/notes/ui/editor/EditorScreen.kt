@@ -5,27 +5,38 @@ import android.graphics.Bitmap
 import android.text.method.LinkMovementMethod
 import android.widget.TextView
 import android.text.style.BackgroundColorSpan
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.rememberTransformableState
-import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
@@ -39,6 +50,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -51,6 +63,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -59,11 +72,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -79,9 +90,13 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import android.graphics.BitmapFactory
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import com.nabla.notes.ui.common.ZoomableImage
+import com.nabla.notes.markdown.NablaLink
 import com.nabla.notes.markdown.countTaskItems
 import com.nabla.notes.markdown.normalizeBareTaskLines
+import com.nabla.notes.markdown.relativeLinkResolverPlugin
 import com.nabla.notes.markdown.taskListTogglePlugin
+import com.nabla.notes.model.FileKind
 import com.nabla.notes.model.MarkdownAction
 import com.nabla.notes.model.NoteFile
 import com.nabla.notes.viewmodel.EditorUiState
@@ -135,6 +150,7 @@ fun EditorScreen(
     noteFile: NoteFile,
     showBack: Boolean,
     onBackClick: () -> Unit,
+    onOpenFile: (id: String, kind: FileKind, name: String) -> Unit = { _, _, _ -> },
     viewModel: EditorViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsState()
@@ -143,6 +159,7 @@ fun EditorScreen(
     val activity = LocalContext.current as Activity
     val snackbarHostState = remember { SnackbarHostState() }
     val coroutineScope = rememberCoroutineScope()
+    var showInsertImageSheet by remember { mutableStateOf(false) }
 
     // Load file on first composition or when file changes
     LaunchedEffect(noteFile.id) {
@@ -242,6 +259,8 @@ fun EditorScreen(
                                 content = textFieldValue.text,
                                 onSaveToGallery = onSaveToGallery,
                                 onToggleTask = { ordinal -> viewModel.toggleTaskItem(ordinal, activity) },
+                                resolveContent = { text -> viewModel.resolveMediaLinks(text, activity) },
+                                onOpenResolvedLink = { link -> onOpenFile(link.id, link.kind, link.name) },
                                 modifier = Modifier
                                     .weight(1f)
                                     .background(MaterialTheme.colorScheme.surface)
@@ -260,6 +279,10 @@ fun EditorScreen(
                                     when (action) {
                                         MarkdownAction.UNDO -> viewModel.undo()
                                         MarkdownAction.REDO -> viewModel.redo()
+                                        MarkdownAction.IMAGE -> {
+                                            viewModel.loadFolderImages(activity)
+                                            showInsertImageSheet = true
+                                        }
                                         else -> viewModel.insertMarkdown(action)
                                     }
                                 }
@@ -269,6 +292,29 @@ fun EditorScreen(
                 }
             }
         }
+    }
+
+    if (showInsertImageSheet) {
+        val folderImages by viewModel.folderImages.collectAsState()
+        InsertImageSheet(
+            folderImages = folderImages,
+            onDismiss = { showInsertImageSheet = false },
+            onExistingSelected = { name ->
+                viewModel.insertImageLink(name, activity)
+                showInsertImageSheet = false
+            },
+            onPhotoPicked = { bytes, mimeType ->
+                coroutineScope.launch {
+                    viewModel.uploadAndInsertPhoto(bytes, mimeType, activity) { success ->
+                        coroutineScope.launch {
+                            if (!success) snackbarHostState.showSnackbar("Failed to upload photo")
+                        }
+                    }
+                }
+                showInsertImageSheet = false
+            },
+            loadThumbnail = { fileId -> viewModel.downloadImageBytes(fileId, activity) }
+        )
     }
 }
 
@@ -384,13 +430,6 @@ private fun ZoomableImageDialog(
     onSaveToGallery: (ByteArray) -> Unit,
     onDismiss: () -> Unit
 ) {
-    var scale by remember { mutableStateOf(1f) }
-    var offset by remember { mutableStateOf(Offset.Zero) }
-    val transformableState = rememberTransformableState { zoomChange, panChange, _ ->
-        scale = (scale * zoomChange).coerceIn(0.5f, 5f)
-        offset += panChange
-    }
-
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(
@@ -409,26 +448,11 @@ private fun ZoomableImageDialog(
                 },
             contentAlignment = Alignment.Center
         ) {
-            Image(
-                bitmap = bitmap.asImageBitmap(),
+            ZoomableImage(
+                bitmap = bitmap,
                 contentDescription = "Mermaid diagram fullscreen",
-                contentScale = ContentScale.Fit,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .graphicsLayer(
-                        scaleX = scale,
-                        scaleY = scale,
-                        translationX = offset.x,
-                        translationY = offset.y
-                    )
-                    .transformable(transformableState)
-                    // Consume taps; long press saves to gallery using cached PNG bytes
-                    .pointerInput(pngBytes) {
-                        detectTapGestures(
-                            onTap = { /* absorb — prevents dismiss */ },
-                            onLongPress = { _ -> pngBytes?.let { onSaveToGallery(it) } }
-                        )
-                    }
+                modifier = Modifier.fillMaxWidth(),
+                onLongPress = { pngBytes?.let { onSaveToGallery(it) } }
             )
 
             // Close (X) button — top-right corner
@@ -523,6 +547,135 @@ private fun MarkdownToolbar(
     }
 }
 
+// ── Insert Photo Sheet ────────────────────────────────────────────────────────
+
+/**
+ * Bottom sheet offered from the Image toolbar button: link to a photo already in the note's
+ * folder, or upload a new one from the gallery or camera.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun InsertImageSheet(
+    folderImages: List<NoteFile>,
+    onDismiss: () -> Unit,
+    onExistingSelected: (fileName: String) -> Unit,
+    onPhotoPicked: (bytes: ByteArray, mimeType: String) -> Unit,
+    loadThumbnail: suspend (fileId: String) -> ByteArray?
+) {
+    val context = LocalContext.current
+    var showFolderList by remember { mutableStateOf(false) }
+    var pendingCameraFile by remember { mutableStateOf<java.io.File?>(null) }
+
+    val galleryLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            val mimeType = context.contentResolver.getType(uri) ?: "image/jpeg"
+            val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            if (bytes != null) onPhotoPicked(bytes, mimeType) else onDismiss()
+        } else {
+            onDismiss()
+        }
+    }
+
+    val cameraLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicture()
+    ) { success ->
+        val file = pendingCameraFile
+        pendingCameraFile = null
+        if (success && file != null) {
+            onPhotoPicked(file.readBytes(), "image/jpeg")
+        } else {
+            onDismiss()
+        }
+        file?.delete()
+    }
+
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        if (!showFolderList) {
+            Column(modifier = Modifier.padding(bottom = 16.dp)) {
+                InsertImageSheetRow("Choose from this folder") { showFolderList = true }
+                InsertImageSheetRow("Choose from gallery") {
+                    galleryLauncher.launch(
+                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                    )
+                }
+                InsertImageSheetRow("Take photo") {
+                    val dir = java.io.File(context.cacheDir, "camera_captures").apply { mkdirs() }
+                    val file = java.io.File(dir, "capture_${System.currentTimeMillis()}.jpg")
+                    pendingCameraFile = file
+                    val uri = androidx.core.content.FileProvider.getUriForFile(
+                        context, "${context.packageName}.fileprovider", file
+                    )
+                    cameraLauncher.launch(uri)
+                }
+            }
+        } else if (folderImages.isEmpty()) {
+            Text(
+                text = "No images in this folder",
+                modifier = Modifier.padding(24.dp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        } else {
+            LazyVerticalGrid(
+                columns = GridCells.Adaptive(minSize = 88.dp),
+                contentPadding = PaddingValues(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+                modifier = Modifier.heightIn(max = 400.dp)
+            ) {
+                items(folderImages, key = { it.id }) { image ->
+                    InsertImageSheetThumbnail(image, loadThumbnail) { onExistingSelected(image.name) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun InsertImageSheetRow(label: String, onClick: () -> Unit) {
+    Text(
+        text = label,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 24.dp, vertical = 16.dp),
+        style = MaterialTheme.typography.bodyLarge
+    )
+}
+
+@Composable
+private fun InsertImageSheetThumbnail(
+    image: NoteFile,
+    loadThumbnail: suspend (fileId: String) -> ByteArray?,
+    onClick: () -> Unit
+) {
+    val bitmap by produceState<Bitmap?>(initialValue = null, image.id) {
+        val bytes = loadThumbnail(image.id)
+        value = bytes?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
+    }
+    Box(
+        modifier = Modifier
+            .aspectRatio(1f)
+            .clip(RoundedCornerShape(4.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        val currentBitmap = bitmap
+        if (currentBitmap != null) {
+            Image(
+                bitmap = currentBitmap.asImageBitmap(),
+                contentDescription = image.name,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            CircularProgressIndicator(modifier = Modifier.size(20.dp))
+        }
+    }
+}
+
 // ── Markdown Preview ──────────────────────────────────────────────────────────
 
 @Composable
@@ -530,10 +683,14 @@ private fun MarkdownPreview(
     content: String,
     onSaveToGallery: (ByteArray) -> Unit,
     onToggleTask: (Int) -> Unit,
+    resolveContent: suspend (String) -> String,
+    onOpenResolvedLink: (NablaLink) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val taskCounter = remember { AtomicInteger(0) }
+    var resolvedContent by remember(content) { mutableStateOf(content) }
+    LaunchedEffect(content) { resolvedContent = resolveContent(content) }
     val markwon = remember {
         Markwon.builder(context)
             .usePlugin(TablePlugin.create(context))
@@ -543,6 +700,7 @@ private fun MarkdownPreview(
             .usePlugin(GlideImagesPlugin.create(context))
             .usePlugin(SoftBreakAddsNewLinePlugin.create())
             .usePlugin(taskListTogglePlugin(taskCounter, onToggleTask))
+            .usePlugin(relativeLinkResolverPlugin(onOpenResolvedLink))
             .usePlugin(HtmlPlugin.create { plugin ->
                 plugin.addHandler(object : TagHandler() {
                     override fun supportedTags() = listOf("mark")
@@ -574,7 +732,7 @@ private fun MarkdownPreview(
             .build()
     }
 
-    val segments = remember(content) { splitMarkdownSegments(content) }
+    val segments = remember(resolvedContent) { splitMarkdownSegments(resolvedContent) }
     // Ordinal of the first checkbox in each segment, so a shared Markwon instance/plugin can
     // report task ordinals consistent with countTaskItems/flipTaskCheckbox over the full content.
     val taskBaseOffsets = remember(segments) {

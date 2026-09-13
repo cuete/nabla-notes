@@ -24,6 +24,9 @@ import androidx.compose.material.icons.filled.Article
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.InsertDriveFile
+import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -61,6 +64,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.nabla.notes.model.BrowserEntry
+import com.nabla.notes.model.FileKind
 import com.nabla.notes.model.FolderItem
 import com.nabla.notes.model.NoteFile
 import com.nabla.notes.viewmodel.BrowserUiState
@@ -377,9 +381,16 @@ private fun NoteFileCard(
             modifier = Modifier.padding(start = 16.dp, top = 12.dp, bottom = 12.dp, end = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            val (icon, description) = when (noteFile.kind) {
+                FileKind.MARKDOWN -> Icons.Filled.Description to "Markdown file"
+                FileKind.TEXT -> Icons.Filled.Article to "Text file"
+                FileKind.IMAGE -> Icons.Filled.Image to "Image file"
+                FileKind.PDF -> Icons.Filled.PictureAsPdf to "PDF file"
+                FileKind.OTHER -> Icons.Filled.InsertDriveFile to "File"
+            }
             Icon(
-                imageVector = if (noteFile.isMarkdown) Icons.Filled.Description else Icons.Filled.Article,
-                contentDescription = if (noteFile.isMarkdown) "Markdown file" else "Text file",
+                imageVector = icon,
+                contentDescription = description,
                 modifier = Modifier.size(24.dp),
                 tint = MaterialTheme.colorScheme.primary
             )

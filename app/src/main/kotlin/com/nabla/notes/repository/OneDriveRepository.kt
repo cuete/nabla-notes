@@ -4,6 +4,7 @@ import android.app.Activity
 import android.util.Log
 import com.nabla.notes.auth.MsalManager
 import com.nabla.notes.model.BrowserEntry
+import com.nabla.notes.model.DriveItemMeta
 import com.nabla.notes.model.FolderItem
 import com.nabla.notes.model.NoteFile
 import kotlinx.coroutines.Dispatchers
@@ -14,6 +15,8 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.IOException
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -152,6 +155,143 @@ class OneDriveRepository @Inject constructor(
         }
     }
 
+    /**
+     * Download and return the raw bytes of a file (images, PDFs, or any binary content).
+     *
+     * @param fileId    OneDrive item ID.
+     * @param activity  Required for interactive auth fallback.
+     */
+    suspend fun downloadFileBytes(
+        fileId: String,
+        activity: Activity
+    ): Result<ByteArray> = withContext(Dispatchers.IO) {
+        try {
+            val token = msalManager.acquireToken(activity).getOrElse { e ->
+                return@withContext Result.failure(e)
+            }
+
+            val url = "$GRAPH_BASE/me/drive/items/$fileId/content"
+            val request = Request.Builder()
+                .url(url)
+                .addHeader("Authorization", "Bearer $token")
+                .get()
+                .build()
+
+            Log.d(TAG, "Downloading file bytes: $fileId")
+            val response = httpClient.newCall(request).execute()
+
+            if (!response.isSuccessful) {
+                val errBody = response.body?.string() ?: ""
+                Log.e(TAG, "Download bytes failed: ${response.code} $errBody")
+                return@withContext Result.failure(IOException("Download failed: ${response.code}"))
+            }
+
+            val bytes = response.body?.bytes() ?: ByteArray(0)
+            Log.d(TAG, "Downloaded ${bytes.size} bytes")
+            Result.success(bytes)
+        } catch (e: Exception) {
+            Log.e(TAG, "downloadFileBytes exception", e)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Download a server-generated thumbnail's bytes (small/medium/large) instead of the full
+     * original file — dramatically smaller/faster for previews (inline markdown images, the
+     * insert-photo picker) where full resolution isn't needed. Uses the same authenticated
+     * `/content` sub-resource pattern as [downloadFileBytes], not a pre-signed URL.
+     *
+     * @param fileId    OneDrive item ID.
+     * @param size      One of "small", "medium", "large".
+     * @param activity  Required for interactive auth fallback.
+     */
+    suspend fun downloadThumbnailBytes(
+        fileId: String,
+        size: String,
+        activity: Activity
+    ): Result<ByteArray> = withContext(Dispatchers.IO) {
+        try {
+            val token = msalManager.acquireToken(activity).getOrElse { e ->
+                return@withContext Result.failure(e)
+            }
+
+            val url = "$GRAPH_BASE/me/drive/items/$fileId/thumbnails/0/$size/content"
+            val request = Request.Builder()
+                .url(url)
+                .addHeader("Authorization", "Bearer $token")
+                .get()
+                .build()
+
+            Log.d(TAG, "Downloading thumbnail ($size): $fileId")
+            val response = httpClient.newCall(request).execute()
+
+            if (!response.isSuccessful) {
+                val errBody = response.body?.string() ?: ""
+                Log.w(TAG, "Download thumbnail failed: ${response.code} $errBody")
+                return@withContext Result.failure(IOException("Thumbnail download failed: ${response.code}"))
+            }
+
+            val bytes = response.body?.bytes() ?: ByteArray(0)
+            Log.d(TAG, "Downloaded thumbnail: ${bytes.size} bytes")
+            Result.success(bytes)
+        } catch (e: Exception) {
+            Log.e(TAG, "downloadThumbnailBytes exception", e)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Resolve an OneDrive item by its root-relative path (e.g. "Notes/trip/photo.png"),
+     * used to resolve relative markdown links/images.
+     *
+     * @param absolutePath  OneDrive-root-relative path, no leading slash.
+     * @param activity      Required for interactive auth fallback.
+     */
+    suspend fun resolveItemByPath(
+        absolutePath: String,
+        activity: Activity
+    ): Result<DriveItemMeta> = withContext(Dispatchers.IO) {
+        try {
+            val token = msalManager.acquireToken(activity).getOrElse { e ->
+                return@withContext Result.failure(e)
+            }
+
+            // Trailing bare ":" (no slash) is required by Graph's path-addressing syntax when
+            // attaching query params to the referenced item itself (as opposed to ":/content"
+            // or ":/children", which address a sub-resource and need the slash).
+            val url = "$GRAPH_BASE/me/drive/root:/${encodePathSegments(absolutePath)}:" +
+                "?\$select=id,name,file,folder,@microsoft.graph.downloadUrl"
+
+            val request = Request.Builder()
+                .url(url)
+                .addHeader("Authorization", "Bearer $token")
+                .get()
+                .build()
+
+            val response = httpClient.newCall(request).execute()
+            val body = response.body?.string() ?: "{}"
+
+            if (!response.isSuccessful) {
+                Log.e(TAG, "resolveItemByPath failed: ${response.code} $body")
+                return@withContext Result.failure(IOException("Resolve failed: ${response.code}"))
+            }
+
+            val json = JSONObject(body)
+            Result.success(
+                DriveItemMeta(
+                    id = json.getString("id"),
+                    name = json.getString("name"),
+                    mimeType = json.optJSONObject("file")?.optString("mimeType"),
+                    downloadUrl = json.optString("@microsoft.graph.downloadUrl", null),
+                    isFolder = json.has("folder")
+                )
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "resolveItemByPath exception", e)
+            Result.failure(e)
+        }
+    }
+
     // ─── File saving ─────────────────────────────────────────────────────────────
 
     /**
@@ -250,19 +390,82 @@ class OneDriveRepository @Inject constructor(
         }
     }
 
+    /**
+     * Upload binary content (e.g. a photo) as a new file in [folderPath]. Uses Graph's
+     * rename conflict behavior, so an existing file with the same name is never overwritten —
+     * the returned [NoteFile.name] reflects whatever name Graph actually assigned.
+     *
+     * @param folderPath  OneDrive folder path (e.g. "Notes/trip") or empty string for root.
+     * @param fileName    Suggested file name including extension.
+     * @param bytes       Raw file content.
+     * @param mimeType    Content type, e.g. "image/jpeg".
+     * @param activity    Required for interactive auth fallback.
+     */
+    suspend fun uploadFileBytes(
+        folderPath: String,
+        fileName: String,
+        bytes: ByteArray,
+        mimeType: String,
+        activity: Activity
+    ): Result<NoteFile> = withContext(Dispatchers.IO) {
+        try {
+            val token = msalManager.acquireToken(activity).getOrElse { e ->
+                return@withContext Result.failure(e)
+            }
+
+            val pathSegment = if (folderPath.isBlank()) fileName else "$folderPath/$fileName"
+            val url = "$GRAPH_BASE/me/drive/root:/${encodePathSegments(pathSegment)}:/content" +
+                "?@microsoft.graph.conflictBehavior=rename"
+
+            val body = bytes.toRequestBody(mimeType.toMediaType())
+            val request = Request.Builder()
+                .url(url)
+                .addHeader("Authorization", "Bearer $token")
+                .put(body)
+                .build()
+
+            Log.d(TAG, "Uploading file: $pathSegment (${bytes.size} bytes)")
+            val response = httpClient.newCall(request).execute()
+            val responseBody = response.body?.string() ?: "{}"
+
+            if (!response.isSuccessful) {
+                Log.e(TAG, "Upload failed: ${response.code} $responseBody")
+                return@withContext Result.failure(IOException("Upload failed: ${response.code}"))
+            }
+
+            val json = JSONObject(responseBody)
+            val uploaded = NoteFile(
+                id = json.getString("id"),
+                name = json.getString("name"),
+                lastModified = json.optString("lastModifiedDateTime", ""),
+                mimeType = json.optJSONObject("file")?.optString("mimeType"),
+                downloadUrl = json.optString("@microsoft.graph.downloadUrl", null),
+                parentPath = folderPath
+            )
+            Log.d(TAG, "File uploaded: ${uploaded.name} (${uploaded.id})")
+            Result.success(uploaded)
+        } catch (e: Exception) {
+            Log.e(TAG, "uploadFileBytes exception", e)
+            Result.failure(e)
+        }
+    }
+
     // ─── Mixed folder+file listing (for file browser) ──────────────────────────────
 
     /**
-     * List both folders and note files (.txt/.md) inside a given OneDrive folder.
+     * List both folders and files (notes, images, PDFs, etc.) inside a given OneDrive folder.
      *
      * Returns a sorted [BrowserEntry] list: folders first (alphabetically),
-     * then note files (alphabetically).
+     * then files (newest first).
      *
-     * @param folderId  OneDrive item ID, or "root" for the drive root.
-     * @param activity  Required for interactive auth fallback.
+     * @param folderId    OneDrive item ID, or "root" for the drive root.
+     * @param folderPath  OneDrive-root-relative path of this folder (e.g. "Notes/trip", or "" for root) —
+     *                    stamped onto each returned [NoteFile] as `parentPath` for relative-link resolution.
+     * @param activity    Required for interactive auth fallback.
      */
     suspend fun listFolderContents(
         folderId: String,
+        folderPath: String,
         activity: Activity
     ): Result<List<BrowserEntry>> = withContext(Dispatchers.IO) {
         try {
@@ -270,7 +473,7 @@ class OneDriveRepository @Inject constructor(
                 return@withContext Result.failure(e)
             }
             val url = buildListUrl(folderId) +
-                "?\$select=id,name,lastModifiedDateTime,folder,file&\$top=200"
+                "?\$select=id,name,lastModifiedDateTime,folder,file,size,@microsoft.graph.downloadUrl&\$top=200"
 
             Log.d(TAG, "Listing folder contents: $folderId")
             val request = Request.Builder()
@@ -304,15 +507,17 @@ class OneDriveRepository @Inject constructor(
                                 )
                             )
                         )
-                    item.has("file") &&
-                        (name.endsWith(".txt", ignoreCase = true) ||
-                         name.endsWith(".md", ignoreCase = true)) ->
+                    item.has("file") ->
                         entries.add(
                             BrowserEntry.File(
                                 NoteFile(
                                     id = item.getString("id"),
                                     name = name,
-                                    lastModified = item.optString("lastModifiedDateTime", "")
+                                    lastModified = item.optString("lastModifiedDateTime", ""),
+                                    mimeType = item.optJSONObject("file")?.optString("mimeType"),
+                                    downloadUrl = item.optString("@microsoft.graph.downloadUrl", null),
+                                    parentFolderId = folderId,
+                                    parentPath = folderPath
                                 )
                             )
                         )
@@ -440,6 +645,12 @@ class OneDriveRepository @Inject constructor(
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+    /** Percent-encodes each segment of an OneDrive-root-relative path, preserving '/'. */
+    private fun encodePathSegments(path: String): String =
+        path.trim('/').split("/").joinToString("/") {
+            URLEncoder.encode(it, StandardCharsets.UTF_8.name()).replace("+", "%20")
+        }
 
     private fun buildListUrl(folderId: String): String =
         if (folderId == "root") {

@@ -12,9 +12,12 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.nabla.notes.model.FileKind
 import com.nabla.notes.ui.browser.FileBrowserScreen
 import com.nabla.notes.ui.editor.EditorScreen
 import com.nabla.notes.ui.settings.SettingsScreen
+import com.nabla.notes.ui.viewer.ImageViewerScreen
+import com.nabla.notes.ui.viewer.PdfViewerScreen
 import com.nabla.notes.viewmodel.BrowserViewModel
 import dagger.hilt.android.AndroidEntryPoint
 import androidx.compose.foundation.layout.Row
@@ -24,6 +27,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.Box
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.navigation.NavController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
@@ -57,6 +61,30 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+// ─── Shared routing helpers ───────────────────────────────────────────────────
+
+private fun encodeFile(file: NoteFile, gson: Gson): String =
+    URLEncoder.encode(gson.toJson(file), StandardCharsets.UTF_8.name())
+
+private fun decodeFile(fileJson: String, gson: Gson): NoteFile =
+    gson.fromJson(URLDecoder.decode(fileJson, StandardCharsets.UTF_8.name()), NoteFile::class.java)
+
+/** Navigate to the appropriate full-screen viewer/editor route for [file]'s kind. */
+private fun NavController.navigateToFile(file: NoteFile, gson: Gson) {
+    val json = encodeFile(file, gson)
+    when (file.kind) {
+        FileKind.MARKDOWN, FileKind.TEXT -> navigate("editor/$json")
+        FileKind.IMAGE -> navigate("imageViewer/$json")
+        FileKind.PDF -> navigate("pdfViewer/$json")
+        FileKind.OTHER -> { /* unsupported file type — no-op */ }
+    }
+}
+
+/** Navigate to a viewer/editor from a resolved in-note link, without a full NoteFile. */
+private fun NavController.navigateToFile(id: String, kind: FileKind, name: String, gson: Gson) {
+    navigateToFile(NoteFile(id = id, name = name), gson)
+}
+
 // ─── Single-Pane Navigation (phones) ─────────────────────────────────────────
 
 @Composable
@@ -75,8 +103,7 @@ private fun SinglePaneLayout(initialNoteJson: String? = null) {
             FileBrowserScreen(
                 viewModel = viewModel,
                 onFileSelected = { file ->
-                    val json = URLEncoder.encode(gson.toJson(file), StandardCharsets.UTF_8.name())
-                    navController.navigate("editor/$json")
+                    navController.navigateToFile(file, gson)
                 },
                 onSettingsClick = {
                     navController.navigate("settings")
@@ -86,11 +113,29 @@ private fun SinglePaneLayout(initialNoteJson: String? = null) {
 
         composable("editor/{fileJson}") { backStackEntry ->
             val fileJson = backStackEntry.arguments?.getString("fileJson") ?: return@composable
-            val decoded = URLDecoder.decode(fileJson, StandardCharsets.UTF_8.name())
-            val noteFile = Gson().fromJson(decoded, NoteFile::class.java)
+            val noteFile = decodeFile(fileJson, gson)
             EditorScreen(
                 noteFile = noteFile,
                 showBack = true,
+                onBackClick = { navController.popBackStack() },
+                onOpenFile = { id, kind, name -> navController.navigateToFile(id, kind, name, gson) }
+            )
+        }
+
+        composable("imageViewer/{fileJson}") { backStackEntry ->
+            val fileJson = backStackEntry.arguments?.getString("fileJson") ?: return@composable
+            val noteFile = decodeFile(fileJson, gson)
+            ImageViewerScreen(
+                noteFile = noteFile,
+                onBackClick = { navController.popBackStack() }
+            )
+        }
+
+        composable("pdfViewer/{fileJson}") { backStackEntry ->
+            val fileJson = backStackEntry.arguments?.getString("fileJson") ?: return@composable
+            val noteFile = decodeFile(fileJson, gson)
+            PdfViewerScreen(
+                noteFile = noteFile,
                 onBackClick = { navController.popBackStack() }
             )
         }
@@ -110,6 +155,7 @@ private fun SplitPaneLayout(initialNoteJson: String? = null) {
     val browserViewModel: BrowserViewModel = hiltViewModel()
     val selectedFile by browserViewModel.selectedFile.collectAsState()
     val navController = rememberNavController()
+    val gson = Gson()
 
     LaunchedEffect(initialNoteJson) {
         if (initialNoteJson != null) {
@@ -130,7 +176,10 @@ private fun SplitPaneLayout(initialNoteJson: String? = null) {
                     FileBrowserScreen(
                         viewModel = browserViewModel,
                         onFileSelected = { file ->
-                            browserViewModel.selectFile(file)
+                            when (file.kind) {
+                                FileKind.MARKDOWN, FileKind.TEXT -> browserViewModel.selectFile(file)
+                                else -> navController.navigateToFile(file, gson)
+                            }
                         },
                         onSettingsClick = {
                             navController.navigate("settings")
@@ -145,11 +194,30 @@ private fun SplitPaneLayout(initialNoteJson: String? = null) {
                         EditorScreen(
                             noteFile = file,
                             showBack = false,
-                            onBackClick = { browserViewModel.clearSelectedFile() }
+                            onBackClick = { browserViewModel.clearSelectedFile() },
+                            onOpenFile = { id, kind, name -> navController.navigateToFile(id, kind, name, gson) }
                         )
                     }
                 }
             }
+        }
+
+        composable("imageViewer/{fileJson}") { backStackEntry ->
+            val fileJson = backStackEntry.arguments?.getString("fileJson") ?: return@composable
+            val noteFile = decodeFile(fileJson, gson)
+            ImageViewerScreen(
+                noteFile = noteFile,
+                onBackClick = { navController.popBackStack() }
+            )
+        }
+
+        composable("pdfViewer/{fileJson}") { backStackEntry ->
+            val fileJson = backStackEntry.arguments?.getString("fileJson") ?: return@composable
+            val noteFile = decodeFile(fileJson, gson)
+            PdfViewerScreen(
+                noteFile = noteFile,
+                onBackClick = { navController.popBackStack() }
+            )
         }
 
         composable("settings") {
