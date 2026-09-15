@@ -92,7 +92,8 @@ class TranscriptionService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        _transcriptEntries.value = transcriptStore.load()
+        // onCreate isn't a suspend context; transcriptStore.load() is (see its doc comment).
+        serviceScope.launch { _transcriptEntries.value = transcriptStore.load() }
     }
 
     override fun onBind(intent: Intent?): IBinder = binder
