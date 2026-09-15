@@ -17,3 +17,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "nabla-notes"
 include(":app")
+include(":voice")
