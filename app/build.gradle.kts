@@ -117,6 +117,9 @@ kotlin {
 }
 
 dependencies {
+    // Dictation (Azure Speech, TranscriptionService) — see :voice/build.gradle.kts
+    implementation(project(":voice"))
+
     // Core
     implementation(libs.androidx.core.ktx)
     implementation(libs.activity.compose)

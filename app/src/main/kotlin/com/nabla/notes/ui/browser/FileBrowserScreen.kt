@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.InsertDriveFile
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
@@ -79,7 +80,8 @@ import java.time.format.FormatStyle
 fun FileBrowserScreen(
     viewModel: BrowserViewModel,
     onFileSelected: (NoteFile) -> Unit,
-    onSettingsClick: () -> Unit
+    onSettingsClick: () -> Unit,
+    onDictateClick: () -> Unit = {}
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val currentPath by viewModel.currentPath.collectAsState()
@@ -121,6 +123,12 @@ fun FileBrowserScreen(
                     }
                 },
                 actions = {
+                    IconButton(onClick = onDictateClick) {
+                        Icon(
+                            imageVector = Icons.Filled.Mic,
+                            contentDescription = "Dictate"
+                        )
+                    }
                     IconButton(onClick = onSettingsClick) {
                         Icon(
                             imageVector = Icons.Filled.Settings,

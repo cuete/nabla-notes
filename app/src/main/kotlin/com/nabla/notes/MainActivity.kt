@@ -14,6 +14,7 @@ import androidx.compose.runtime.getValue
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.nabla.notes.model.FileKind
 import com.nabla.notes.ui.browser.FileBrowserScreen
+import com.nabla.notes.ui.dictation.DictationScreen
 import com.nabla.notes.ui.editor.EditorScreen
 import com.nabla.notes.ui.settings.SettingsScreen
 import com.nabla.notes.ui.viewer.ImageViewerScreen
@@ -107,8 +108,15 @@ private fun SinglePaneLayout(initialNoteJson: String? = null) {
                 },
                 onSettingsClick = {
                     navController.navigate("settings")
+                },
+                onDictateClick = {
+                    navController.navigate("dictation")
                 }
             )
+        }
+
+        composable("dictation") {
+            DictationScreen(onBackClick = { navController.popBackStack() })
         }
 
         composable("editor/{fileJson}") { backStackEntry ->
@@ -183,6 +191,9 @@ private fun SplitPaneLayout(initialNoteJson: String? = null) {
                         },
                         onSettingsClick = {
                             navController.navigate("settings")
+                        },
+                        onDictateClick = {
+                            navController.navigate("dictation")
                         }
                     )
                 }
@@ -218,6 +229,10 @@ private fun SplitPaneLayout(initialNoteJson: String? = null) {
                 noteFile = noteFile,
                 onBackClick = { navController.popBackStack() }
             )
+        }
+
+        composable("dictation") {
+            DictationScreen(onBackClick = { navController.popBackStack() })
         }
 
         composable("settings") {
