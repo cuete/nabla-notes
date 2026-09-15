@@ -3,9 +3,8 @@ import java.time.LocalDate
 
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
-    alias(libs.plugins.kotlin.kapt)
+    alias(libs.plugins.ksp)
     alias(libs.plugins.hilt)
 }
 
@@ -41,12 +40,17 @@ val computedVersionName = "1.0"
 
 android {
     namespace = "com.nabla.notes"
-    compileSdk = 34
+    // Compose 1.12 / core-ktx 1.19 require compiling against API 37+.
+    // targetSdk stays a step behind on purpose, matching nabla-chato-voice's
+    // toolchain bump: compiling against new APIs is independent of opting
+    // in to new runtime behavior, and nothing here needs the latter yet.
+    compileSdk = 37
+    compileSdkMinor = 2
 
     defaultConfig {
         applicationId = "com.nabla.notes"
         minSdk = 26
-        targetSdk = 34
+        targetSdk = 36
         versionCode = computedVersionCode
         versionName = computedVersionName
 
@@ -60,15 +64,10 @@ android {
         )
     }
 
-    // APK naming: <namespace>-debug.apk for debug, <namespace>.apk for release
-    applicationVariants.all {
-        val variant = this
-        variant.outputs.all {
-            val output = this as com.android.build.gradle.internal.api.BaseVariantOutputImpl
-            val ns = android.namespace ?: applicationId
-            output.outputFileName = if (variant.buildType.name == "debug") "$ns-debug.apk" else "$ns.apk"
-        }
-    }
+    // APKs keep Gradle's default names (app-debug.apk / app-release.apk). The old
+    // applicationVariants rename is gone with AGP 9's new DSL, and renaming here is
+    // not worth an internal-API cast: the OneDrive copy hook already prefixes each
+    // file with its repo folder name, so builds from different projects don't collide.
 
     buildTypes {
         debug {
@@ -93,10 +92,6 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
@@ -109,6 +104,15 @@ android {
             isIncludeAndroidResources = true
             isReturnDefaultValues = true
         }
+    }
+}
+
+// Replaces the old android.kotlinOptions block, which AGP 9's built-in Kotlin
+// support no longer provides. jvmTarget rather than jvmToolchain so the build
+// uses the JDK already running Gradle instead of provisioning a second one.
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
     }
 }
 
@@ -137,7 +141,7 @@ dependencies {
 
     // Hilt
     implementation(libs.hilt.android)
-    kapt(libs.hilt.compiler)
+    ksp(libs.hilt.compiler)
     implementation(libs.hilt.navigation.compose)
 
     // Coroutines
@@ -163,11 +167,13 @@ dependencies {
     // DataStore
     implementation(libs.datastore.preferences)
 
+    // JSON — see version-catalog comment on the gson alias
+    implementation(libs.gson)
+
     // Testing
     testImplementation("junit:junit:4.13.2")
     testImplementation("io.mockk:mockk:1.13.10")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
-    testImplementation("androidx.datastore:datastore-preferences:1.1.1")
     testImplementation("androidx.test:core-ktx:1.5.0")
     testImplementation("org.robolectric:robolectric:4.12.1")
 }
