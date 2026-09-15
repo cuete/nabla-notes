@@ -246,6 +246,24 @@ class EditorViewModel @Inject constructor(
     }
 
     /**
+     * Insert dictated [text] at the current cursor position, trailing space so consecutive
+     * utterances read as one continuous flow rather than running together — matches
+     * [insertImageLink]'s insert-at-cursor pattern.
+     */
+    fun insertDictatedText(text: String, activity: Activity) {
+        if (text.isBlank()) return
+        val current = _textFieldValue.value
+        val insert = "$text "
+        val newText = current.text.substring(0, current.selection.start) +
+            insert +
+            current.text.substring(current.selection.end)
+        val newCursor = current.selection.start + insert.length
+        pushHistory(current)
+        _textFieldValue.value = TextFieldValue(newText, TextRange(newCursor))
+        scheduleAutosave(activity)
+    }
+
+    /**
      * Upload a newly picked/captured photo into the current file's folder, then insert a
      * relative link to it (using whatever name Graph actually assigned, in case of a rename
      * conflict — see [OneDriveRepository.uploadFileBytes]).

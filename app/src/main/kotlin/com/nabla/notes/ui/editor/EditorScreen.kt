@@ -1,6 +1,8 @@
 package com.nabla.notes.ui.editor
 
+import android.Manifest
 import android.app.Activity
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.text.method.LinkMovementMethod
 import android.widget.TextView
@@ -44,11 +46,14 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
@@ -98,6 +103,9 @@ import com.nabla.notes.markdown.relativeLinkResolverPlugin
 import com.nabla.notes.markdown.taskListTogglePlugin
 import com.nabla.notes.model.FileKind
 import com.nabla.notes.model.MarkdownAction
+import com.nabla.notes.viewmodel.DictationSessionState
+import com.nabla.notes.viewmodel.DictationViewModel
+import com.nabla.voice.DictationMode
 import com.nabla.notes.model.NoteFile
 import com.nabla.notes.viewmodel.EditorUiState
 import com.nabla.notes.viewmodel.EditorViewModel
@@ -151,7 +159,8 @@ fun EditorScreen(
     showBack: Boolean,
     onBackClick: () -> Unit,
     onOpenFile: (id: String, kind: FileKind, name: String) -> Unit = { _, _, _ -> },
-    viewModel: EditorViewModel = hiltViewModel()
+    viewModel: EditorViewModel = hiltViewModel(),
+    dictationViewModel: DictationViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val textFieldValue by viewModel.textFieldValue.collectAsState()
@@ -164,6 +173,54 @@ fun EditorScreen(
     // Load file on first composition or when file changes
     LaunchedEffect(noteFile.id) {
         viewModel.loadFile(noteFile, activity)
+    }
+
+    // ── Dictate-at-cursor (P4) ──────────────────────────────────────────────────
+    // dictationBaseline is null until this screen's own mic button starts a session —
+    // set even if DictationViewModel's init happened to passively reattach to a session
+    // some OTHER screen started, so a background session never silently starts typing into
+    // whatever note happens to be open. Only entries accepted after this screen explicitly
+    // starts (or resumes control of) recording get inserted.
+    val dictationState by dictationViewModel.state.collectAsState()
+    val transcriptEntries by dictationViewModel.transcriptEntries.collectAsState()
+    var dictationBaseline by remember { mutableStateOf<Int?>(null) }
+    val micPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            dictationViewModel.setMode(DictationMode.NOTES)
+            dictationBaseline = transcriptEntries.size
+            dictationViewModel.startSession()
+        } else {
+            coroutineScope.launch { snackbarHostState.showSnackbar("Microphone permission is required to dictate.") }
+        }
+    }
+
+    LaunchedEffect(Unit) { dictationViewModel.setActivity(activity) }
+
+    LaunchedEffect(transcriptEntries, dictationBaseline) {
+        val baseline = dictationBaseline ?: return@LaunchedEffect
+        if (transcriptEntries.size > baseline) {
+            transcriptEntries.drop(baseline).forEach { entry -> viewModel.insertDictatedText(entry.text, activity) }
+            dictationBaseline = transcriptEntries.size
+        }
+    }
+
+    fun toggleDictation() {
+        if (dictationState is DictationSessionState.Recording) {
+            dictationViewModel.stopSession()
+            dictationBaseline = null
+            return
+        }
+        val hasPermission = activity.checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        if (hasPermission) {
+            dictationViewModel.setMode(DictationMode.NOTES)
+            dictationBaseline = transcriptEntries.size
+            dictationViewModel.startSession()
+        } else {
+            micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
     }
 
     // Show "Saved" snackbar on explicit (non-silent) save
@@ -214,6 +271,18 @@ fun EditorScreen(
                     }
                 },
                 actions = {
+                    // Dictate at cursor — only in edit mode; dictating into a read-only preview
+                    // has nowhere to insert.
+                    if (!isMarkdownPreview) {
+                        val recording = dictationState is DictationSessionState.Recording
+                        IconButton(onClick = { toggleDictation() }) {
+                            Icon(
+                                imageVector = if (recording) Icons.Filled.Stop else Icons.Filled.Mic,
+                                contentDescription = if (recording) "Stop dictating" else "Dictate",
+                                tint = if (recording) MaterialTheme.colorScheme.error else LocalContentColor.current
+                            )
+                        }
+                    }
                     // Toggle preview / edit mode (only for .md files or when in preview)
                     if (noteFile.isMarkdown || isMarkdownPreview) {
                         IconButton(onClick = { viewModel.toggleMarkdownPreview() }) {
