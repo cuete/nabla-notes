@@ -315,13 +315,13 @@ class DictationViewModel @Inject constructor(
     private fun stripPendingMarkers(text: String): String =
         text.lines().joinToString("\n") { it.removePrefix(SPOKEN_PREFIX).removePrefix(TYPED_PREFIX) }
 
-    fun clearPendingText() {
-        _pendingText.update { "" }
-        viewModelScope.launch { dictationRepository.savePendingText("") }
-    }
-
+    /** Clears both the transcript and the pending-notes buffer derived from it — a full reset. */
     fun clearTranscript() {
         _transcriptEntries.update { emptyList() }
+        // dictationRepository.clearSession() below wipes the persisted pendingText too, so the
+        // in-memory flow has to be reset here in lockstep — previously wasn't, leaving stale
+        // text on screen after a clear (2026-09-15 device-testing feedback).
+        _pendingText.update { "" }
         foldedCount = 0
         viewModelScope.launch { dictationRepository.clearSession() }
         // If a session is currently active, the service's own cumulative list must be wiped

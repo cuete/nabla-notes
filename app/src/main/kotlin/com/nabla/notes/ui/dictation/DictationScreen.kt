@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
@@ -73,6 +74,7 @@ fun DictationScreen(
     val settings by viewModel.settings.collectAsState()
 
     var showSettingsDialog by remember { mutableStateOf(false) }
+    var showClearConfirm by remember { mutableStateOf(false) }
     var typedInput by remember { mutableStateOf("") }
     var saveTitle by remember { mutableStateOf("") }
 
@@ -109,6 +111,11 @@ fun DictationScreen(
                     }
                 },
                 actions = {
+                    if (entries.isNotEmpty() || pendingText.isNotBlank()) {
+                        IconButton(onClick = { showClearConfirm = true }) {
+                            Icon(Icons.Filled.Delete, contentDescription = "Clear transcript and notes")
+                        }
+                    }
                     IconButton(onClick = { showSettingsDialog = true }) {
                         Icon(Icons.Filled.Settings, contentDescription = "Dictation settings")
                     }
@@ -207,6 +214,21 @@ fun DictationScreen(
                 enabled = saveTitle.isNotBlank() && pendingText.isNotBlank()
             ) { Text("Save") }
         }
+    }
+
+    if (showClearConfirm) {
+        AlertDialog(
+            onDismissRequest = { showClearConfirm = false },
+            title = { Text("Clear transcript and notes?") },
+            text = { Text("This deletes the current transcript and pending notes. It can't be undone.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.clearTranscript()
+                    showClearConfirm = false
+                }) { Text("Clear") }
+            },
+            dismissButton = { TextButton(onClick = { showClearConfirm = false }) { Text("Cancel") } }
+        )
     }
 
     if (showSettingsDialog) {

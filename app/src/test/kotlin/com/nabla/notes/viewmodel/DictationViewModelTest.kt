@@ -145,11 +145,17 @@ class DictationViewModelTest {
     }
 
     @Test
-    fun `clearTranscript clears entries and calls DictationRepository clearSession`() {
+    fun `clearTranscript clears entries, pending text, and calls DictationRepository clearSession`() {
+        viewModel.addTypedText("hello world")
+
         viewModel.clearTranscript()
         testDispatcher.scheduler.advanceUntilIdle()
 
         assertEquals(emptyList<TranscriptEntry>(), viewModel.transcriptEntries.value)
+        // dictationRepository.clearSession() wipes the persisted pendingText too — the
+        // in-memory flow has to match, or clearing leaves stale text on screen (regression
+        // caught 2026-09-15: clearTranscript only reset transcriptEntries, not pendingText).
+        assertEquals("", viewModel.pendingText.value)
         coVerify { dictationRepository.clearSession() }
     }
 
@@ -209,16 +215,6 @@ class DictationViewModelTest {
         viewModel.appendPendingText("más voz", typed = false)
 
         assertEquals("🎙 hola\n📝 typed note\n🎙 más voz", viewModel.pendingText.value)
-    }
-
-    @Test
-    fun `clearPendingText resets pending text`() {
-        viewModel.addTypedText("hello world")
-
-        viewModel.clearPendingText()
-        testDispatcher.scheduler.advanceUntilIdle()
-
-        assertEquals("", viewModel.pendingText.value)
     }
 
     // --- Save ---
