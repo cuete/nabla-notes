@@ -246,10 +246,4 @@ class DictationViewModelTest {
         coVerify { oneDriveRepository.saveFileContent("abc123", "hello world", activity) }
         assertEquals("Saved to Notes/title.md", viewModel.saveStatus.value)
     }
-
-    @Test
-    fun `saveTranscriptToOneDrive is a no-op when there are no entries`() {
-        viewModel.saveTranscriptToOneDrive("title")
-        confirmVerified(oneDriveRepository)
-    }
 }

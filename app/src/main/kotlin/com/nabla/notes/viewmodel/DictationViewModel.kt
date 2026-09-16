@@ -335,8 +335,14 @@ class DictationViewModel @Inject constructor(
     }
 
     // --- Save to OneDrive ---
-    // Both save into the app's already-configured note folder (SettingsRepository) — dictation
+    // Saves into the app's already-configured note folder (SettingsRepository) — dictation
     // doesn't get its own separate folder setting, it shares the one the file browser uses.
+    //
+    // Only one save action, by design (2026-09-15 device-testing feedback): an earlier version
+    // had a second "Save transcript" (timestamp + speaker per line) alongside this one, saving
+    // pendingText's plain markers-stripped prose. That read as two buttons doing almost the
+    // same thing. The on-screen live transcript still shows timestamp/speaker per entry — this
+    // only changed what gets saved, not what's displayed while dictating.
 
     /** Saves the pending notes buffer (spoken + typed, markers stripped) as a new note. */
     fun saveNotesToOneDrive(title: String) {
@@ -344,16 +350,6 @@ class DictationViewModel @Inject constructor(
         if (text.isBlank()) return
         saveToOneDrive(title, text)
     }
-
-    /** Saves the full timestamped transcript as a new note. */
-    fun saveTranscriptToOneDrive(title: String) {
-        val entries = _transcriptEntries.value
-        if (entries.isEmpty()) return
-        saveToOneDrive(title, formatTranscript(entries))
-    }
-
-    private fun formatTranscript(entries: List<TranscriptEntry>): String =
-        entries.joinToString("\n") { "[${it.timestamp}] ${it.speakerId}: ${it.text}" }
 
     private fun saveToOneDrive(title: String, content: String) {
         val activity = activityRef?.get() ?: run {

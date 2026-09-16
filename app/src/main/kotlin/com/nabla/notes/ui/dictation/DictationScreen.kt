@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -20,8 +21,8 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -120,7 +121,8 @@ fun DictationScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .padding(16.dp),
+                .padding(16.dp)
+                .imePadding(),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
@@ -163,7 +165,8 @@ fun DictationScreen(
             }
 
             if (pendingText.isNotBlank()) {
-                Card(modifier = Modifier.fillMaxWidth()) {
+                Text("Pending notes (what \"Save notes\" will save)", style = MaterialTheme.typography.titleSmall)
+                OutlinedCard(modifier = Modifier.fillMaxWidth()) {
                     Text(
                         text = pendingText,
                         modifier = Modifier.padding(12.dp),
@@ -198,21 +201,11 @@ fun DictationScreen(
                 label = { Text("Title") },
                 singleLine = true
             )
-            Row(
+            Button(
+                onClick = { viewModel.saveNotesToOneDrive(saveTitle) },
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Button(
-                    onClick = { viewModel.saveNotesToOneDrive(saveTitle) },
-                    modifier = Modifier.weight(1f),
-                    enabled = saveTitle.isNotBlank() && pendingText.isNotBlank()
-                ) { Text("Save notes") }
-                Button(
-                    onClick = { viewModel.saveTranscriptToOneDrive(saveTitle) },
-                    modifier = Modifier.weight(1f),
-                    enabled = saveTitle.isNotBlank() && entries.isNotEmpty()
-                ) { Text("Save transcript") }
-            }
+                enabled = saveTitle.isNotBlank() && pendingText.isNotBlank()
+            ) { Text("Save") }
         }
     }
 
