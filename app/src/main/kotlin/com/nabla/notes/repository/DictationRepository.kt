@@ -5,6 +5,7 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import com.nabla.notes.model.NoteLine
 import com.nabla.voice.TranscriptEntry
 import com.nabla.voice.TranscriptStore
 import kotlinx.coroutines.flow.first
@@ -31,7 +32,7 @@ class DictationRepository @Inject constructor(
         private val KEY_AZURE_SPEECH_KEY = stringPreferencesKey("dictation_azure_speech_key")
         private val KEY_AZURE_SPEECH_REGION = stringPreferencesKey("dictation_azure_speech_region")
         private val KEY_CONTEXT_NOTES = stringPreferencesKey("dictation_context_notes")
-        private val KEY_PENDING_TEXT = stringPreferencesKey("dictation_pending_text")
+        private val KEY_NOTE_LINES = stringPreferencesKey("dictation_note_lines")
         private val KEY_PENDING_FOLDED_COUNT = intPreferencesKey("dictation_pending_folded_count")
         private val KEY_TRANSCRIPT = stringPreferencesKey("dictation_transcript")
         private const val DEFAULT_AZURE_REGION = "eastus"
@@ -52,14 +53,32 @@ class DictationRepository @Inject constructor(
         dataStore.edit { it[KEY_CONTEXT_NOTES] = notes }
     }
 
-    suspend fun pendingText(): String = pref(KEY_PENDING_TEXT, "")
-    suspend fun savePendingText(text: String) {
-        dataStore.edit { it[KEY_PENDING_TEXT] = text }
+    suspend fun noteLines(): List<NoteLine> {
+        val raw = pref(KEY_NOTE_LINES, "")
+        if (raw.isBlank()) return emptyList()
+        return raw.lines().mapNotNull { line ->
+            val parts = line.split("\t", limit = 5)
+            if (parts.size != 5) return@mapNotNull null
+            NoteLine(
+                timestamp = parts[0],
+                speakerId = parts[1].ifEmpty { null },
+                text = parts[2],
+                typed = parts[3].toBoolean(),
+                precededByGap = parts[4].toBoolean(),
+            )
+        }
     }
 
-    suspend fun pendingTextFoldedCount(): Int =
+    suspend fun saveNoteLines(lines: List<NoteLine>) {
+        val raw = lines.joinToString("\n") {
+            "${it.timestamp}\t${it.speakerId ?: ""}\t${it.text}\t${it.typed}\t${it.precededByGap}"
+        }
+        dataStore.edit { it[KEY_NOTE_LINES] = raw }
+    }
+
+    suspend fun noteLinesFoldedCount(): Int =
         dataStore.data.map { it[KEY_PENDING_FOLDED_COUNT] ?: 0 }.first()
-    suspend fun savePendingTextFoldedCount(count: Int) {
+    suspend fun saveNoteLinesFoldedCount(count: Int) {
         dataStore.edit { it[KEY_PENDING_FOLDED_COUNT] = count }
     }
 
@@ -67,7 +86,7 @@ class DictationRepository @Inject constructor(
     suspend fun clearSession() {
         dataStore.edit { prefs ->
             prefs.remove(KEY_CONTEXT_NOTES)
-            prefs.remove(KEY_PENDING_TEXT)
+            prefs.remove(KEY_NOTE_LINES)
             prefs.remove(KEY_PENDING_FOLDED_COUNT)
             prefs.remove(KEY_TRANSCRIPT)
         }

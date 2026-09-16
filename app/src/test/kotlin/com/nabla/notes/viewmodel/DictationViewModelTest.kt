@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import com.nabla.notes.model.AppSettings
+import com.nabla.notes.model.NoteLine
 import com.nabla.notes.repository.DictationRepository
 import com.nabla.notes.repository.OneDriveRepository
 import com.nabla.notes.repository.SettingsRepository
@@ -20,6 +21,12 @@ import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+/** Mirrors DictationViewModel's private formatter, so tests can compute the same timestamps. */
+private val testTimeFormat = SimpleDateFormat("HH:mm:ss", Locale.US)
 
 /**
  * Ported from nabla-chato-voice's DictationViewModelTest. Dropped: every organizeNotes/
@@ -42,8 +49,8 @@ class DictationViewModelTest {
     fun setup() {
         Dispatchers.setMain(testDispatcher)
         coEvery { dictationRepository.load() } returns emptyList()
-        coEvery { dictationRepository.pendingTextFoldedCount() } returns 0
-        coEvery { dictationRepository.pendingText() } returns ""
+        coEvery { dictationRepository.noteLinesFoldedCount() } returns 0
+        coEvery { dictationRepository.noteLines() } returns emptyList()
         coEvery { dictationRepository.contextNotes() } returns ""
         coEvery { dictationRepository.azureSpeechKey() } returns ""
         coEvery { dictationRepository.azureSpeechRegion() } returns "eastus"
@@ -145,29 +152,34 @@ class DictationViewModelTest {
     }
 
     @Test
-    fun `clearTranscript clears entries, pending text, and calls DictationRepository clearSession`() {
+    fun `clearTranscript clears entries, note lines, and calls DictationRepository clearSession`() {
         viewModel.addTypedText("hello world")
 
         viewModel.clearTranscript()
         testDispatcher.scheduler.advanceUntilIdle()
 
         assertEquals(emptyList<TranscriptEntry>(), viewModel.transcriptEntries.value)
-        // dictationRepository.clearSession() wipes the persisted pendingText too — the
+        // dictationRepository.clearSession() wipes the persisted note lines too — the
         // in-memory flow has to match, or clearing leaves stale text on screen (regression
-        // caught 2026-09-15: clearTranscript only reset transcriptEntries, not pendingText).
-        assertEquals("", viewModel.pendingText.value)
+        // caught 2026-09-15: clearTranscript only reset transcriptEntries, not the pending
+        // buffer).
+        assertEquals(emptyList<NoteLine>(), viewModel.noteLines.value)
         coVerify { dictationRepository.clearSession() }
     }
 
-    // --- Notes: typed input + pending buffer ---
+    // --- Notes: typed input + unified note-lines stream ---
 
     @Test
-    fun `addTypedText appends trimmed text to pendingText with typed marker`() {
+    fun `addTypedText appends a typed NoteLine with no speaker`() {
+        val now = 1_000_000L
+        viewModel.clockMs = { now }
+
         viewModel.addTypedText("  hello world  ")
         testDispatcher.scheduler.advanceUntilIdle()
 
-        assertEquals("📝 hello world", viewModel.pendingText.value)
-        coVerify { dictationRepository.savePendingText("📝 hello world") }
+        val expected = NoteLine(testTimeFormat.format(Date(now)), speakerId = null, text = "hello world", typed = true)
+        assertEquals(listOf(expected), viewModel.noteLines.value)
+        coVerify { dictationRepository.saveNoteLines(listOf(expected)) }
     }
 
     @Test
@@ -175,12 +187,12 @@ class DictationViewModelTest {
         viewModel.addTypedText("   ")
         testDispatcher.scheduler.advanceUntilIdle()
 
-        assertEquals("", viewModel.pendingText.value)
-        coVerify(exactly = 0) { dictationRepository.savePendingText(any()) }
+        assertEquals(emptyList<NoteLine>(), viewModel.noteLines.value)
+        coVerify(exactly = 0) { dictationRepository.saveNoteLines(any()) }
     }
 
     @Test
-    fun `consecutive entries within the pause window each get their own line`() {
+    fun `consecutive entries within the pause window are not marked as gapped`() {
         var now = 1_000_000L
         viewModel.clockMs = { now }
 
@@ -188,11 +200,12 @@ class DictationViewModelTest {
         now += 5_000L
         viewModel.addTypedText("second")
 
-        assertEquals("📝 first\n📝 second", viewModel.pendingText.value)
+        assertEquals(listOf(false, false), viewModel.noteLines.value.map { it.precededByGap })
+        assertEquals(listOf("first", "second"), viewModel.noteLines.value.map { it.text })
     }
 
     @Test
-    fun `a 60-second pause inserts an extra blank line before the next entry`() {
+    fun `a 60-second pause marks the next entry as precededByGap`() {
         var now = 1_000_000L
         viewModel.clockMs = { now }
 
@@ -200,33 +213,40 @@ class DictationViewModelTest {
         now += DictationViewModel.PENDING_LINE_BREAK_GAP_MS
         viewModel.addTypedText("second")
 
-        assertEquals("📝 first\n\n📝 second", viewModel.pendingText.value)
+        assertEquals(listOf(false, true), viewModel.noteLines.value.map { it.precededByGap })
     }
 
     @Test
-    fun `voice and typed entries each get their own marked line`() {
+    fun `spoken and typed entries interleave, each keeping their own speaker and timestamp`() {
         var now = 1_000_000L
         viewModel.clockMs = { now }
 
-        viewModel.appendPendingText("hola", typed = false)
+        viewModel.appendNoteLine(timestamp = "10:00:00", speakerId = "You", text = "hola", typed = false)
         now += 5_000L
-        viewModel.appendPendingText("typed note", typed = true)
+        viewModel.appendNoteLine(timestamp = "10:00:05", speakerId = null, text = "typed note", typed = true)
         now += 5_000L
-        viewModel.appendPendingText("más voz", typed = false)
+        viewModel.appendNoteLine(timestamp = "10:00:10", speakerId = "You", text = "más voz", typed = false)
 
-        assertEquals("🎙 hola\n📝 typed note\n🎙 más voz", viewModel.pendingText.value)
+        assertEquals(
+            listOf(
+                NoteLine("10:00:00", "You", "hola", typed = false),
+                NoteLine("10:00:05", null, "typed note", typed = true),
+                NoteLine("10:00:10", "You", "más voz", typed = false),
+            ),
+            viewModel.noteLines.value
+        )
     }
 
     // --- Save ---
 
     @Test
-    fun `saveNotesToOneDrive is a no-op when pending text is blank`() {
+    fun `saveNotesToOneDrive is a no-op when there are no note lines`() {
         viewModel.saveNotesToOneDrive("title")
         confirmVerified(oneDriveRepository)
     }
 
     @Test
-    fun `saveNotesToOneDrive strips source markers, creates then writes the file, in the configured folder`() {
+    fun `saveNotesToOneDrive joins note line text plainly, creates then writes the file, in the configured folder`() {
         val activity = mockk<android.app.Activity>(relaxed = true)
         viewModel.setActivity(activity)
         viewModel.addTypedText("hello world")

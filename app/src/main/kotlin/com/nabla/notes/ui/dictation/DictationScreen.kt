@@ -8,8 +8,10 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -23,7 +25,6 @@ import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -50,8 +51,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.nabla.notes.model.NoteLine
 import com.nabla.voice.DictationMode
-import com.nabla.voice.TranscriptEntry
 import com.nabla.notes.viewmodel.DictationSessionState
 import com.nabla.notes.viewmodel.DictationViewModel
 import kotlinx.coroutines.launch
@@ -68,8 +69,7 @@ fun DictationScreen(
 
     val mode by viewModel.mode.collectAsState()
     val state by viewModel.state.collectAsState()
-    val entries by viewModel.transcriptEntries.collectAsState()
-    val pendingText by viewModel.pendingText.collectAsState()
+    val noteLines by viewModel.noteLines.collectAsState()
     val saveStatus by viewModel.saveStatus.collectAsState()
     val settings by viewModel.settings.collectAsState()
 
@@ -111,9 +111,9 @@ fun DictationScreen(
                     }
                 },
                 actions = {
-                    if (entries.isNotEmpty() || pendingText.isNotBlank()) {
+                    if (noteLines.isNotEmpty()) {
                         IconButton(onClick = { showClearConfirm = true }) {
-                            Icon(Icons.Filled.Delete, contentDescription = "Clear transcript and notes")
+                            Icon(Icons.Filled.Delete, contentDescription = "Clear notes")
                         }
                     }
                     IconButton(onClick = { showSettingsDialog = true }) {
@@ -166,20 +166,14 @@ fun DictationScreen(
 
             HorizontalDivider()
 
-            Text("Transcript", style = MaterialTheme.typography.titleSmall)
+            // One unified stream — spoken (timestamp + speaker) and typed (timestamp, no
+            // speaker) lines interleaved in the order they happened. Used to be two separate
+            // views (a live transcript list, a separate pending-notes preview) showing the same
+            // spoken content twice; merged 2026-09-15 per device-testing feedback, keeping the
+            // timestamp/speaker detail the old transcript view had rather than dropping it.
+            Text("Notes", style = MaterialTheme.typography.titleSmall)
             LazyColumn(modifier = Modifier.weight(1f)) {
-                items(entries) { entry -> TranscriptEntryRow(entry) }
-            }
-
-            if (pendingText.isNotBlank()) {
-                Text("Pending notes (what \"Save notes\" will save)", style = MaterialTheme.typography.titleSmall)
-                OutlinedCard(modifier = Modifier.fillMaxWidth()) {
-                    Text(
-                        text = pendingText,
-                        modifier = Modifier.padding(12.dp),
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                }
+                items(noteLines) { line -> NoteLineRow(line) }
             }
 
             Row(
@@ -211,7 +205,7 @@ fun DictationScreen(
             Button(
                 onClick = { viewModel.saveNotesToOneDrive(saveTitle) },
                 modifier = Modifier.fillMaxWidth(),
-                enabled = saveTitle.isNotBlank() && pendingText.isNotBlank()
+                enabled = saveTitle.isNotBlank() && noteLines.isNotEmpty()
             ) { Text("Save") }
         }
     }
@@ -245,14 +239,20 @@ fun DictationScreen(
 }
 
 @Composable
-private fun TranscriptEntryRow(entry: TranscriptEntry) {
+private fun NoteLineRow(line: NoteLine) {
+    if (line.precededByGap) {
+        Spacer(modifier = Modifier.height(12.dp))
+    }
     Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+        // Typed entries have no speaker to diarize — the 📝 marker is the only source cue,
+        // same visual role the old separate pending-notes view served, now folded into one row.
+        val label = if (line.typed) "[${line.timestamp}] 📝 " else "[${line.timestamp}] ${line.speakerId}: "
         Text(
-            text = "[${entry.timestamp}] ${entry.speakerId}: ",
+            text = label,
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
-        Text(text = entry.text, style = MaterialTheme.typography.bodySmall)
+        Text(text = line.text, style = MaterialTheme.typography.bodySmall)
     }
 }
 
