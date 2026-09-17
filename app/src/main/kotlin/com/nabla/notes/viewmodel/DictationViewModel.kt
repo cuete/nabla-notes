@@ -5,7 +5,6 @@ import android.content.Context
 import android.content.Intent
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.nabla.notes.model.NoteLine
 import com.nabla.notes.repository.DictationRepository
 import com.nabla.notes.repository.OneDriveRepository
 import com.nabla.notes.repository.SettingsRepository
@@ -17,6 +16,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -25,29 +25,20 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.lang.ref.WeakReference
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import javax.inject.Inject
 
 /**
  * Ported from nabla-chato-voice's DictationViewModel (see that repo's commit d8e8dc9 for the
- * "service owns the session" design and commit history for the reattach/fold-reconciliation
- * logic, both carried over unchanged here).
+ * "service owns the session" design and commit history for the reattach logic, both carried
+ * over unchanged here).
  *
- * Deliberately NOT ported: organizeNotes()/summarize(), which called chato's OpenClaw gateway
- * to LLM-process the pending text into a structured note. That's the provider-agnostic
- * summarizer seam flagged for a later phase — porting chato's hardcoded-to-one-provider
- * version now just to redesign it later would be wasted work. For now, noteLines (see below,
- * plain text joined) is what gets saved directly — a plainer artifact than chato's
- * LLM-organized note, but a real one, not a stub.
- *
- * noteLines replaced a flat pendingText string 2026-09-15 (device-testing feedback: the
- * separate live transcript view and the pending-notes preview showed the same content twice
- * while purely dictating — pendingText was literally derived from transcriptEntries, see
- * foldNewEntriesIntoNoteLines below — and unifying them into one view meant giving typed
- * entries the timestamp/speaker structure spoken entries already had, which a plain string
- * with embedded 🎙/📝 markers couldn't carry).
+ * Deliberately NOT implemented: real summarization. summaryText always stays null — it's the
+ * seam for the provider-agnostic summarizer (a separate, not-yet-built phase; see the Summary
+ * tab in DictationScreen, its Summarize button disabled until that phase lands). transcriptEntries
+ * and typedNotes are what will become that summarizer's input payload once it exists — kept as
+ * two independent fields rather than merged into one stream, per 2026-09-16 device-testing
+ * feedback (an earlier round tried unifying them into one NoteLine list; reverted — the Notes
+ * tab is "just a box", independent of the transcript, not interleaved with it).
  */
 sealed class DictationSessionState {
     object Idle : DictationSessionState()
@@ -78,8 +69,12 @@ class DictationViewModel @Inject constructor(
     private val _transcriptEntries = MutableStateFlow<List<TranscriptEntry>>(emptyList())
     val transcriptEntries: StateFlow<List<TranscriptEntry>> = _transcriptEntries.asStateFlow()
 
-    private val _noteLines = MutableStateFlow<List<NoteLine>>(emptyList())
-    val noteLines: StateFlow<List<NoteLine>> = _noteLines.asStateFlow()
+    private val _typedNotes = MutableStateFlow("")
+    val typedNotes: StateFlow<String> = _typedNotes.asStateFlow()
+
+    /** Always null until the summarizer phase exists — see class doc. */
+    private val _summaryText = MutableStateFlow<String?>(null)
+    val summaryText: StateFlow<String?> = _summaryText.asStateFlow()
 
     private val _saveStatus = MutableStateFlow<String?>(null)
     val saveStatus: StateFlow<String?> = _saveStatus.asStateFlow()
@@ -94,30 +89,13 @@ class DictationViewModel @Inject constructor(
     private var utteranceCollectorJob: Job? = null
     private val serviceConnection = TranscriptionServiceConnection()
     private var serviceIntent: Intent? = null
-
-    /** Overridable in tests to control elapsed-time behavior deterministically. */
-    internal var clockMs: () -> Long = { System.currentTimeMillis() }
-    private var lastAppendAtMs: Long = 0L
-    private val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.US)
-
-    // How many of the service's transcriptEntries this ViewModel has already folded into
-    // noteLines. See DictationRepository's KEY_PENDING_FOLDED_COUNT and
-    // foldNewEntriesIntoNoteLines() below.
-    private var foldedCount: Int = 0
-
-    companion object {
-        internal const val PENDING_LINE_BREAK_GAP_MS = 60_000L
-    }
+    private var typedNotesSaveJob: Job? = null
 
     init {
         viewModelScope.launch {
             _transcriptEntries.update { dictationRepository.load() }
-            foldedCount = dictationRepository.noteLinesFoldedCount()
-            _noteLines.update { dictationRepository.noteLines() }
+            _typedNotes.update { dictationRepository.typedNotes() }
             loadSettings()
-            // foldedCount must be set before this — see its assignment above. A nested launch
-            // inside tryReattachToRunningService doesn't reorder that; it only schedules work
-            // that runs later, once a service is actually found and connected.
             tryReattachToRunningService()
         }
     }
@@ -144,22 +122,6 @@ class DictationViewModel @Inject constructor(
     // --- Session (Start/Stop dictation) ---
 
     /**
-     * Fold transcript entries the service accepted that this (or any prior, now-dead)
-     * ViewModel instance hasn't folded into noteLines yet. Driven off [foldedCount] — a
-     * persisted count — rather than reacting to each utterance live, so a gap where nothing
-     * was attached still gets reconciled correctly on reattach instead of silently missing
-     * content the eventual save/organize step would otherwise never see.
-     */
-    private fun foldNewEntriesIntoNoteLines(allEntries: List<TranscriptEntry>) {
-        if (allEntries.size <= foldedCount) return
-        allEntries.drop(foldedCount).forEach { entry ->
-            appendNoteLine(timestamp = entry.timestamp, speakerId = entry.speakerId, text = entry.text, typed = false)
-        }
-        foldedCount = allEntries.size
-        viewModelScope.launch { dictationRepository.saveNoteLinesFoldedCount(foldedCount) }
-    }
-
-    /**
      * Collect [svc]'s flows. Launched as children of the caller's coroutine (an extension on
      * CoroutineScope, not its own viewModelScope.launch) so [startSession] and
      * [tryReattachToRunningService] can each track the whole "wait for svc, then attach" unit
@@ -178,10 +140,7 @@ class DictationViewModel @Inject constructor(
         }
 
         launch {
-            svc.transcriptEntries.collect { allEntries ->
-                _transcriptEntries.update { allEntries }
-                foldNewEntriesIntoNoteLines(allEntries)
-            }
+            svc.transcriptEntries.collect { allEntries -> _transcriptEntries.update { allEntries } }
         }
 
         launch {
@@ -294,39 +253,29 @@ class DictationViewModel @Inject constructor(
         if (_state.value is DictationSessionState.Error) _state.update { DictationSessionState.Idle }
     }
 
-    // --- Notes: typed input + unified note-lines stream ---
-
-    /** Typed notes join the same stream as dictation, just with speakerId = null. */
-    fun addTypedText(text: String) {
-        val trimmed = text.trim()
-        if (trimmed.isBlank()) return
-        appendNoteLine(timestamp = timeFormat.format(Date(clockMs())), speakerId = null, text = trimmed, typed = true)
-    }
+    // --- Notes tab: just a box (2026-09-16 feedback) ---
 
     /**
-     * A pause of [PENDING_LINE_BREAK_GAP_MS] or more before this entry marks it
-     * [NoteLine.precededByGap], so the UI can render a visual break — flags a bigger gap than
-     * routine pauses between utterances.
+     * Updates immediately for a responsive UI, persists on a debounce — same shape as
+     * EditorViewModel's autosave, for the same reason: this can fire on every keystroke, and a
+     * DataStore write per keystroke is exactly the hot-path-persistence mistake just fixed in
+     * TranscriptionService (see that file's onUtteranceRecognized comment).
      */
-    internal fun appendNoteLine(timestamp: String, speakerId: String?, text: String, typed: Boolean) {
-        val now = clockMs()
-        val gap = lastAppendAtMs != 0L && (now - lastAppendAtMs) >= PENDING_LINE_BREAK_GAP_MS
-        _noteLines.update { current ->
-            val updated = current + NoteLine(timestamp, speakerId, text, typed, precededByGap = gap)
-            viewModelScope.launch { dictationRepository.saveNoteLines(updated) }
-            updated
+    fun updateTypedNotes(text: String) {
+        _typedNotes.value = text
+        typedNotesSaveJob?.cancel()
+        typedNotesSaveJob = viewModelScope.launch {
+            delay(1000L)
+            dictationRepository.saveTypedNotes(text)
         }
-        lastAppendAtMs = now
     }
 
-    /** Clears both the transcript and the note-lines stream derived from it — a full reset. */
+    /** Clears the transcript and the typed notes — a full reset. */
     fun clearTranscript() {
         _transcriptEntries.update { emptyList() }
-        // dictationRepository.clearSession() below wipes the persisted note lines too, so the
-        // in-memory flow has to be reset here in lockstep — previously wasn't, leaving stale
-        // text on screen after a clear (2026-09-15 device-testing feedback).
-        _noteLines.update { emptyList() }
-        foldedCount = 0
+        _typedNotes.value = ""
+        _summaryText.update { null }
+        typedNotesSaveJob?.cancel()
         viewModelScope.launch { dictationRepository.clearSession() }
         // If a session is currently active, the service's own cumulative list must be wiped
         // too — otherwise its next StateFlow emission would resurrect the pre-clear entries
@@ -338,22 +287,42 @@ class DictationViewModel @Inject constructor(
         _saveStatus.update { null }
     }
 
-    // --- Save to OneDrive ---
+    // --- Save to OneDrive (Summary tab) ---
     // Saves into the app's already-configured note folder (SettingsRepository) — dictation
     // doesn't get its own separate folder setting, it shares the one the file browser uses.
-    //
-    // Only one save action, by design (2026-09-15 device-testing feedback): an earlier version
-    // had a second "Save transcript" (timestamp + speaker per line) alongside this one, saving
-    // pendingText's plain-prose equivalent. That read as two buttons doing almost the same
-    // thing. Saved content stays plain text (no timestamp/speaker) — that decision didn't
-    // change when noteLines unified the live view; only the live view did.
+    // Three targets, matching chato's original transcript/summary/both choice. Summary-involving
+    // saves are unreachable in practice right now (summaryText is always null — see class doc)
+    // but built for real rather than stubbed, so nothing needs rewriting once summarization
+    // actually exists.
 
-    /** Saves the note-lines stream (spoken + typed, plain text) as a new note. */
-    fun saveNotesToOneDrive(title: String) {
-        val text = _noteLines.value.joinToString("\n") { it.text }
-        if (text.isBlank()) return
-        saveToOneDrive(title, text)
+    fun saveTranscriptToOneDrive(title: String) {
+        val entries = _transcriptEntries.value
+        if (entries.isEmpty()) return
+        saveToOneDrive(title, formatTranscript(entries))
     }
+
+    fun saveSummaryToOneDrive(title: String) {
+        val summary = _summaryText.value
+        if (summary.isNullOrBlank()) return
+        saveToOneDrive(title, summary)
+    }
+
+    fun saveBothToOneDrive(title: String) {
+        val entries = _transcriptEntries.value
+        val summary = _summaryText.value
+        if (summary.isNullOrBlank() || entries.isEmpty()) return
+        val combined = buildString {
+            appendLine("## Summary")
+            appendLine(summary)
+            appendLine()
+            appendLine("## Transcript")
+            append(formatTranscript(entries))
+        }
+        saveToOneDrive(title, combined)
+    }
+
+    private fun formatTranscript(entries: List<TranscriptEntry>): String =
+        entries.joinToString("\n") { "[${it.timestamp}] ${it.speakerId}: ${it.text}" }
 
     private fun saveToOneDrive(title: String, content: String) {
         val activity = activityRef?.get() ?: run {

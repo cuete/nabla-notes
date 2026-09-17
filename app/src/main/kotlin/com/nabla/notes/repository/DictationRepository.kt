@@ -3,9 +3,7 @@ package com.nabla.notes.repository
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
-import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
-import com.nabla.notes.model.NoteLine
 import com.nabla.voice.TranscriptEntry
 import com.nabla.voice.TranscriptStore
 import kotlinx.coroutines.flow.first
@@ -22,6 +20,12 @@ import javax.inject.Singleton
  * [com.nabla.notes.di.VoiceModule]. Transcript entries are serialized the same tab-delimited
  * way chato's ChatoGatewayRepository used, not JSON — no library on the classpath here parses
  * tab-free text faster than it'd take to pull one in for three fields.
+ *
+ * typedNotes (2026-09-16 device-testing feedback) is deliberately just a plain string, not a
+ * structured/interleaved-with-transcript type — the Notes tab is "just a box", independent of
+ * the transcript, sent alongside it as its own field once summarization exists (P5) rather than
+ * merged into one stream beforehand. An earlier round tried unifying spoken+typed into one
+ * unified list (NoteLine) and that was the wrong direction per this feedback — removed.
  */
 @Singleton
 class DictationRepository @Inject constructor(
@@ -32,8 +36,7 @@ class DictationRepository @Inject constructor(
         private val KEY_AZURE_SPEECH_KEY = stringPreferencesKey("dictation_azure_speech_key")
         private val KEY_AZURE_SPEECH_REGION = stringPreferencesKey("dictation_azure_speech_region")
         private val KEY_CONTEXT_NOTES = stringPreferencesKey("dictation_context_notes")
-        private val KEY_NOTE_LINES = stringPreferencesKey("dictation_note_lines")
-        private val KEY_PENDING_FOLDED_COUNT = intPreferencesKey("dictation_pending_folded_count")
+        private val KEY_TYPED_NOTES = stringPreferencesKey("dictation_typed_notes")
         private val KEY_TRANSCRIPT = stringPreferencesKey("dictation_transcript")
         private const val DEFAULT_AZURE_REGION = "eastus"
     }
@@ -53,41 +56,16 @@ class DictationRepository @Inject constructor(
         dataStore.edit { it[KEY_CONTEXT_NOTES] = notes }
     }
 
-    suspend fun noteLines(): List<NoteLine> {
-        val raw = pref(KEY_NOTE_LINES, "")
-        if (raw.isBlank()) return emptyList()
-        return raw.lines().mapNotNull { line ->
-            val parts = line.split("\t", limit = 5)
-            if (parts.size != 5) return@mapNotNull null
-            NoteLine(
-                timestamp = parts[0],
-                speakerId = parts[1].ifEmpty { null },
-                text = parts[2],
-                typed = parts[3].toBoolean(),
-                precededByGap = parts[4].toBoolean(),
-            )
-        }
-    }
-
-    suspend fun saveNoteLines(lines: List<NoteLine>) {
-        val raw = lines.joinToString("\n") {
-            "${it.timestamp}\t${it.speakerId ?: ""}\t${it.text}\t${it.typed}\t${it.precededByGap}"
-        }
-        dataStore.edit { it[KEY_NOTE_LINES] = raw }
-    }
-
-    suspend fun noteLinesFoldedCount(): Int =
-        dataStore.data.map { it[KEY_PENDING_FOLDED_COUNT] ?: 0 }.first()
-    suspend fun saveNoteLinesFoldedCount(count: Int) {
-        dataStore.edit { it[KEY_PENDING_FOLDED_COUNT] = count }
+    suspend fun typedNotes(): String = pref(KEY_TYPED_NOTES, "")
+    suspend fun saveTypedNotes(text: String) {
+        dataStore.edit { it[KEY_TYPED_NOTES] = text }
     }
 
     /** Clears everything except Azure settings — those are config, not session state. */
     suspend fun clearSession() {
         dataStore.edit { prefs ->
             prefs.remove(KEY_CONTEXT_NOTES)
-            prefs.remove(KEY_NOTE_LINES)
-            prefs.remove(KEY_PENDING_FOLDED_COUNT)
+            prefs.remove(KEY_TYPED_NOTES)
             prefs.remove(KEY_TRANSCRIPT)
         }
     }

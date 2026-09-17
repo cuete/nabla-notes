@@ -8,10 +8,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -54,8 +52,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
-import com.nabla.notes.model.NoteLine
 import com.nabla.voice.DictationMode
+import com.nabla.voice.TranscriptEntry
 import com.nabla.notes.viewmodel.DictationSessionState
 import com.nabla.notes.viewmodel.DictationViewModel
 import kotlinx.coroutines.launch
@@ -64,18 +62,17 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * Three tabs long-term — Transcript / Notes / Summary — mirroring chato's original tab split
- * (device-testing feedback, 2026-09-16: "the 'type a note' section should be a new tab").
- * Only Transcript and Notes are real here; Summary needs the provider-agnostic summarizer seam
- * (a separate, not-yet-built phase — see DictationViewModel's class doc on why organizeNotes/
- * summarize weren't ported) — it shows as a disabled placeholder rather than a half-built stub.
- * Title + Save live on the Notes tab for now; per feedback they belong on the Summary tab
- * once it exists, with chato's original transcript/summary/both save-target choice. Moving
- * them is deferred with Summary itself rather than removing working save capability early.
+ * Transcript / Notes / Summary (2026-09-16 device-testing feedback, mirroring chato's original
+ * tab split). Notes is deliberately just a typed-text box, independent of the transcript — the
+ * two get combined only as separate fields in a future summarizer payload, not merged into one
+ * stream beforehand (an earlier round tried that unification; reverted). Summary is real UI —
+ * not a stub screen — but its Summarize button stays disabled until the provider-agnostic
+ * summarizer phase exists; see DictationViewModel's class doc.
  */
 private enum class DictationTab(val label: String) {
     TRANSCRIPT("Transcript"),
     NOTES("Notes"),
+    SUMMARY("Summary"),
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -90,13 +87,14 @@ fun DictationScreen(
 
     val mode by viewModel.mode.collectAsState()
     val state by viewModel.state.collectAsState()
-    val noteLines by viewModel.noteLines.collectAsState()
+    val transcriptEntries by viewModel.transcriptEntries.collectAsState()
+    val typedNotes by viewModel.typedNotes.collectAsState()
+    val summaryText by viewModel.summaryText.collectAsState()
     val saveStatus by viewModel.saveStatus.collectAsState()
     val settings by viewModel.settings.collectAsState()
 
     var showSettingsDialog by remember { mutableStateOf(false) }
     var showClearConfirm by remember { mutableStateOf(false) }
-    var typedInput by remember { mutableStateOf("") }
     var saveTitle by remember { mutableStateOf(defaultNoteTitle()) }
     var selectedTab by remember { mutableIntStateOf(0) }
 
@@ -133,9 +131,9 @@ fun DictationScreen(
                     }
                 },
                 actions = {
-                    if (noteLines.isNotEmpty()) {
+                    if (transcriptEntries.isNotEmpty() || typedNotes.isNotBlank()) {
                         IconButton(onClick = { showClearConfirm = true }) {
-                            Icon(Icons.Filled.Delete, contentDescription = "Clear notes")
+                            Icon(Icons.Filled.Delete, contentDescription = "Clear transcript and notes")
                         }
                     }
                     IconButton(onClick = { showSettingsDialog = true }) {
@@ -154,30 +152,28 @@ fun DictationScreen(
                 .imePadding(),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // Session controls — not tab-specific, stay visible no matter which tab is open.
-            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                DictationMode.entries.forEachIndexed { index, m ->
-                    SegmentedButton(
-                        selected = mode == m,
-                        onClick = { viewModel.setMode(m) },
-                        shape = SegmentedButtonDefaults.itemShape(index = index, count = DictationMode.entries.size)
-                    ) {
-                        Text(if (m == DictationMode.NOTES) "Notes" else "Conversation")
-                    }
-                }
-            }
-
+            // Session controls — mode + Start/Stop share one row, not tab-specific, stay visible
+            // no matter which tab is open. "Dictation" (was "Notes") to avoid confusion with the
+            // Notes tab; "Start"/"Stop" instead of "Start dictating" now that they're side by side.
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
+                SingleChoiceSegmentedButtonRow(modifier = Modifier.weight(1f)) {
+                    DictationMode.entries.forEachIndexed { index, m ->
+                        SegmentedButton(
+                            selected = mode == m,
+                            onClick = { viewModel.setMode(m) },
+                            shape = SegmentedButtonDefaults.itemShape(index = index, count = DictationMode.entries.size)
+                        ) {
+                            Text(if (m == DictationMode.NOTES) "Dictation" else "Conversation")
+                        }
+                    }
+                }
                 val recording = state is DictationSessionState.Recording
-                Button(
-                    onClick = { if (recording) viewModel.stopSession() else startOrRequestPermission() },
-                    modifier = Modifier.weight(1f)
-                ) {
+                Button(onClick = { if (recording) viewModel.stopSession() else startOrRequestPermission() }) {
                     Icon(if (recording) Icons.Filled.Stop else Icons.Filled.Mic, contentDescription = null)
-                    Text(if (recording) "  Stop" else "  Start dictating")
+                    Text(if (recording) "  Stop" else "  Start")
                 }
             }
 
@@ -197,41 +193,47 @@ fun DictationScreen(
                         text = { Text(tab.label) }
                     )
                 }
-                // Placeholder — see class doc. Disabled, not a working tab yet.
-                Tab(selected = false, onClick = {}, enabled = false, text = { Text("Summary") })
             }
 
             when (DictationTab.entries[selectedTab]) {
                 DictationTab.TRANSCRIPT -> {
-                    // Read-only live view of everything said/typed so far, in order.
+                    // Read-only live view — spoken entries only, in the same buffer regardless
+                    // of which mode (Dictation/Conversation) recorded them, unchanged from
+                    // before this round.
                     LazyColumn(modifier = Modifier.weight(1f)) {
-                        items(noteLines) { line -> NoteLineRow(line) }
+                        items(transcriptEntries) { entry -> TranscriptEntryRow(entry) }
                     }
                 }
 
                 DictationTab.NOTES -> {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        OutlinedTextField(
-                            value = typedInput,
-                            onValueChange = { typedInput = it },
-                            modifier = Modifier.weight(1f),
-                            label = { Text("Type a note") },
-                            singleLine = true
-                        )
-                        Button(onClick = {
-                            viewModel.addTypedText(typedInput)
-                            typedInput = ""
-                        }) { Text("Add") }
-                    }
+                    // Just a box — independent of the transcript, no Add button, no live list.
+                    // Sent alongside the transcript as a separate field once summarization
+                    // exists; not merged into one stream beforehand.
+                    OutlinedTextField(
+                        value = typedNotes,
+                        onValueChange = { viewModel.updateTypedNotes(it) },
+                        modifier = Modifier.fillMaxSize(),
+                        label = { Text("Notes") },
+                    )
+                }
 
-                    LazyColumn(modifier = Modifier.weight(1f)) {
-                        items(noteLines) { line -> NoteLineRow(line) }
-                    }
+                DictationTab.SUMMARY -> {
+                    Button(
+                        onClick = {},
+                        enabled = false,
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Summarize") }
+                    Text(
+                        "Summarization isn't implemented yet.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
 
                     HorizontalDivider()
+
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(summaryText ?: "No summary yet.", style = MaterialTheme.typography.bodySmall)
+                    }
 
                     OutlinedTextField(
                         value = saveTitle,
@@ -240,11 +242,26 @@ fun DictationScreen(
                         label = { Text("Title") },
                         singleLine = true
                     )
-                    Button(
-                        onClick = { viewModel.saveNotesToOneDrive(saveTitle) },
+                    Row(
                         modifier = Modifier.fillMaxWidth(),
-                        enabled = saveTitle.isNotBlank() && noteLines.isNotEmpty()
-                    ) { Text("Save") }
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = { viewModel.saveTranscriptToOneDrive(saveTitle) },
+                            modifier = Modifier.weight(1f),
+                            enabled = saveTitle.isNotBlank() && transcriptEntries.isNotEmpty()
+                        ) { Text("Transcript") }
+                        Button(
+                            onClick = { viewModel.saveSummaryToOneDrive(saveTitle) },
+                            modifier = Modifier.weight(1f),
+                            enabled = saveTitle.isNotBlank() && !summaryText.isNullOrBlank()
+                        ) { Text("Summary") }
+                        Button(
+                            onClick = { viewModel.saveBothToOneDrive(saveTitle) },
+                            modifier = Modifier.weight(1f),
+                            enabled = saveTitle.isNotBlank() && !summaryText.isNullOrBlank() && transcriptEntries.isNotEmpty()
+                        ) { Text("Both") }
+                    }
                 }
             }
         }
@@ -254,7 +271,7 @@ fun DictationScreen(
         AlertDialog(
             onDismissRequest = { showClearConfirm = false },
             title = { Text("Clear transcript and notes?") },
-            text = { Text("This deletes the current transcript and pending notes. It can't be undone.") },
+            text = { Text("This deletes the current transcript and notes. It can't be undone.") },
             confirmButton = {
                 TextButton(onClick = {
                     viewModel.clearTranscript()
@@ -283,20 +300,14 @@ private fun defaultNoteTitle(): String =
     "${SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())}_Note"
 
 @Composable
-private fun NoteLineRow(line: NoteLine) {
-    if (line.precededByGap) {
-        Spacer(modifier = Modifier.height(12.dp))
-    }
+private fun TranscriptEntryRow(entry: TranscriptEntry) {
     Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
-        // Typed entries have no speaker to diarize — the 📝 marker is the only source cue,
-        // same visual role the old separate pending-notes view served, now folded into one row.
-        val label = if (line.typed) "[${line.timestamp}] 📝 " else "[${line.timestamp}] ${line.speakerId}: "
         Text(
-            text = label,
+            text = "[${entry.timestamp}] ${entry.speakerId}: ",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
-        Text(text = line.text, style = MaterialTheme.typography.bodySmall)
+        Text(text = entry.text, style = MaterialTheme.typography.bodySmall)
     }
 }
 

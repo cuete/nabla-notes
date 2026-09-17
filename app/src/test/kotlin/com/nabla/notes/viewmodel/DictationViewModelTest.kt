@@ -4,7 +4,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import com.nabla.notes.model.AppSettings
-import com.nabla.notes.model.NoteLine
 import com.nabla.notes.repository.DictationRepository
 import com.nabla.notes.repository.OneDriveRepository
 import com.nabla.notes.repository.SettingsRepository
@@ -21,12 +20,6 @@ import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-
-/** Mirrors DictationViewModel's private formatter, so tests can compute the same timestamps. */
-private val testTimeFormat = SimpleDateFormat("HH:mm:ss", Locale.US)
 
 /**
  * Ported from nabla-chato-voice's DictationViewModelTest. Dropped: every organizeNotes/
@@ -34,6 +27,10 @@ private val testTimeFormat = SimpleDateFormat("HH:mm:ss", Locale.US)
  * the gatewayRepository mock for the same reason. Added: OneDriveRepository/SettingsRepository
  * mocks for the save path, and DictationRepository's methods are all suspend (unlike chato's
  * synchronous ChatoGatewayRepository), so setup uses coEvery instead of every throughout.
+ *
+ * 2026-09-16: dropped the unified NoteLine model an earlier round introduced — typedNotes is
+ * back to being an independent plain string (Notes tab is "just a box"), transcriptEntries is
+ * the service's plain list again, no fold/interleave logic to test anymore.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class DictationViewModelTest {
@@ -49,8 +46,7 @@ class DictationViewModelTest {
     fun setup() {
         Dispatchers.setMain(testDispatcher)
         coEvery { dictationRepository.load() } returns emptyList()
-        coEvery { dictationRepository.noteLinesFoldedCount() } returns 0
-        coEvery { dictationRepository.noteLines() } returns emptyList()
+        coEvery { dictationRepository.typedNotes() } returns ""
         coEvery { dictationRepository.contextNotes() } returns ""
         coEvery { dictationRepository.azureSpeechKey() } returns ""
         coEvery { dictationRepository.azureSpeechRegion() } returns "eastus"
@@ -152,114 +148,90 @@ class DictationViewModelTest {
     }
 
     @Test
-    fun `clearTranscript clears entries, note lines, and calls DictationRepository clearSession`() {
-        viewModel.addTypedText("hello world")
+    fun `clearTranscript clears entries, typed notes, and calls DictationRepository clearSession`() {
+        viewModel.updateTypedNotes("hello world")
 
         viewModel.clearTranscript()
         testDispatcher.scheduler.advanceUntilIdle()
 
         assertEquals(emptyList<TranscriptEntry>(), viewModel.transcriptEntries.value)
-        // dictationRepository.clearSession() wipes the persisted note lines too — the
-        // in-memory flow has to match, or clearing leaves stale text on screen (regression
-        // caught 2026-09-15: clearTranscript only reset transcriptEntries, not the pending
-        // buffer).
-        assertEquals(emptyList<NoteLine>(), viewModel.noteLines.value)
+        assertEquals("", viewModel.typedNotes.value)
         coVerify { dictationRepository.clearSession() }
     }
 
-    // --- Notes: typed input + unified note-lines stream ---
+    // --- Notes tab: just a box ---
 
     @Test
-    fun `addTypedText appends a typed NoteLine with no speaker`() {
-        val now = 1_000_000L
-        viewModel.clockMs = { now }
+    fun `updateTypedNotes updates immediately`() {
+        viewModel.updateTypedNotes("hello world")
 
-        viewModel.addTypedText("  hello world  ")
-        testDispatcher.scheduler.advanceUntilIdle()
-
-        val expected = NoteLine(testTimeFormat.format(Date(now)), speakerId = null, text = "hello world", typed = true)
-        assertEquals(listOf(expected), viewModel.noteLines.value)
-        coVerify { dictationRepository.saveNoteLines(listOf(expected)) }
+        assertEquals("hello world", viewModel.typedNotes.value)
     }
 
     @Test
-    fun `addTypedText with blank input is a no-op`() {
-        viewModel.addTypedText("   ")
-        testDispatcher.scheduler.advanceUntilIdle()
+    fun `updateTypedNotes persists on a debounce, not on every keystroke`() {
+        viewModel.updateTypedNotes("h")
+        viewModel.updateTypedNotes("he")
+        viewModel.updateTypedNotes("hel")
+        coVerify(exactly = 0) { dictationRepository.saveTypedNotes(any()) }
 
-        assertEquals(emptyList<NoteLine>(), viewModel.noteLines.value)
-        coVerify(exactly = 0) { dictationRepository.saveNoteLines(any()) }
+        testDispatcher.scheduler.advanceTimeBy(1001L)
+        testDispatcher.scheduler.runCurrent()
+
+        // Only the final value is persisted — each keystroke cancels the previous pending save.
+        coVerify(exactly = 1) { dictationRepository.saveTypedNotes("hel") }
     }
 
-    @Test
-    fun `consecutive entries within the pause window are not marked as gapped`() {
-        var now = 1_000_000L
-        viewModel.clockMs = { now }
-
-        viewModel.addTypedText("first")
-        now += 5_000L
-        viewModel.addTypedText("second")
-
-        assertEquals(listOf(false, false), viewModel.noteLines.value.map { it.precededByGap })
-        assertEquals(listOf("first", "second"), viewModel.noteLines.value.map { it.text })
-    }
+    // --- Save (Summary tab) ---
 
     @Test
-    fun `a 60-second pause marks the next entry as precededByGap`() {
-        var now = 1_000_000L
-        viewModel.clockMs = { now }
-
-        viewModel.addTypedText("first")
-        now += DictationViewModel.PENDING_LINE_BREAK_GAP_MS
-        viewModel.addTypedText("second")
-
-        assertEquals(listOf(false, true), viewModel.noteLines.value.map { it.precededByGap })
-    }
-
-    @Test
-    fun `spoken and typed entries interleave, each keeping their own speaker and timestamp`() {
-        var now = 1_000_000L
-        viewModel.clockMs = { now }
-
-        viewModel.appendNoteLine(timestamp = "10:00:00", speakerId = "You", text = "hola", typed = false)
-        now += 5_000L
-        viewModel.appendNoteLine(timestamp = "10:00:05", speakerId = null, text = "typed note", typed = true)
-        now += 5_000L
-        viewModel.appendNoteLine(timestamp = "10:00:10", speakerId = "You", text = "más voz", typed = false)
-
-        assertEquals(
-            listOf(
-                NoteLine("10:00:00", "You", "hola", typed = false),
-                NoteLine("10:00:05", null, "typed note", typed = true),
-                NoteLine("10:00:10", "You", "más voz", typed = false),
-            ),
-            viewModel.noteLines.value
-        )
-    }
-
-    // --- Save ---
-
-    @Test
-    fun `saveNotesToOneDrive is a no-op when there are no note lines`() {
-        viewModel.saveNotesToOneDrive("title")
+    fun `saveTranscriptToOneDrive is a no-op when there are no transcript entries`() {
+        viewModel.saveTranscriptToOneDrive("title")
         confirmVerified(oneDriveRepository)
     }
 
     @Test
-    fun `saveNotesToOneDrive joins note line text plainly, creates then writes the file, in the configured folder`() {
+    fun `saveSummaryToOneDrive is a no-op — summaryText is always null until summarization exists`() {
+        viewModel.saveSummaryToOneDrive("title")
+        confirmVerified(oneDriveRepository)
+    }
+
+    @Test
+    fun `saveBothToOneDrive is a no-op — summaryText is always null until summarization exists`() {
+        viewModel.saveBothToOneDrive("title")
+        confirmVerified(oneDriveRepository)
+    }
+
+    @Test
+    fun `saveTranscriptToOneDrive formats timestamp and speaker per line, creates then writes the file`() {
         val activity = mockk<android.app.Activity>(relaxed = true)
         viewModel.setActivity(activity)
-        viewModel.addTypedText("hello world")
 
+        val mockService = mockk<TranscriptionService>(relaxed = true)
+        val entries = listOf(TranscriptEntry("10:00:01", "You", "hello world"))
+        every { mockService.transcriptEntries } returns MutableStateFlow(entries)
+        every { mockService.isRecording } returns MutableStateFlow(true)
+        every { mockService.error } returns MutableSharedFlow()
+        val binder = mockk<TranscriptionService.TranscriptionBinder>()
+        every { binder.getService() } returns mockService
+        every { context.bindService(any(), any(), 0) } answers {
+            secondArg<ServiceConnection>().onServiceConnected(mockk(relaxed = true), binder)
+            true
+        }
+        val reattached = DictationViewModel(context, dictationRepository, oneDriveRepository, settingsRepository)
+        reattached.setActivity(activity)
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        val expectedContent = "[10:00:01] You: hello world"
         val newFile = com.nabla.notes.model.NoteFile(id = "abc123", name = "title.md", lastModified = "")
         coEvery { oneDriveRepository.createFile("Notes", "title.md", activity) } returns Result.success(newFile)
-        coEvery { oneDriveRepository.saveFileContent("abc123", "hello world", activity) } returns Result.success(Unit)
+        coEvery { oneDriveRepository.saveFileContent("abc123", expectedContent, activity) } returns Result.success(Unit)
 
-        viewModel.saveNotesToOneDrive("title")
+        reattached.saveTranscriptToOneDrive("title")
         testDispatcher.scheduler.advanceUntilIdle()
 
         coVerify { oneDriveRepository.createFile("Notes", "title.md", activity) }
-        coVerify { oneDriveRepository.saveFileContent("abc123", "hello world", activity) }
-        assertEquals("Saved to Notes/title.md", viewModel.saveStatus.value)
+        coVerify { oneDriveRepository.saveFileContent("abc123", expectedContent, activity) }
+        assertEquals("Saved to Notes/title.md", reattached.saveStatus.value)
     }
 }
