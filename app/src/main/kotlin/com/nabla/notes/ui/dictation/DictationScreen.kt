@@ -36,6 +36,8 @@ import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -43,6 +45,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -56,6 +59,24 @@ import com.nabla.voice.DictationMode
 import com.nabla.notes.viewmodel.DictationSessionState
 import com.nabla.notes.viewmodel.DictationViewModel
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+/**
+ * Three tabs long-term — Transcript / Notes / Summary — mirroring chato's original tab split
+ * (device-testing feedback, 2026-09-16: "the 'type a note' section should be a new tab").
+ * Only Transcript and Notes are real here; Summary needs the provider-agnostic summarizer seam
+ * (a separate, not-yet-built phase — see DictationViewModel's class doc on why organizeNotes/
+ * summarize weren't ported) — it shows as a disabled placeholder rather than a half-built stub.
+ * Title + Save live on the Notes tab for now; per feedback they belong on the Summary tab
+ * once it exists, with chato's original transcript/summary/both save-target choice. Moving
+ * them is deferred with Summary itself rather than removing working save capability early.
+ */
+private enum class DictationTab(val label: String) {
+    TRANSCRIPT("Transcript"),
+    NOTES("Notes"),
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -76,7 +97,8 @@ fun DictationScreen(
     var showSettingsDialog by remember { mutableStateOf(false) }
     var showClearConfirm by remember { mutableStateOf(false) }
     var typedInput by remember { mutableStateOf("") }
-    var saveTitle by remember { mutableStateOf("") }
+    var saveTitle by remember { mutableStateOf(defaultNoteTitle()) }
+    var selectedTab by remember { mutableIntStateOf(0) }
 
     LaunchedEffect(Unit) { viewModel.setActivity(activity) }
 
@@ -132,6 +154,7 @@ fun DictationScreen(
                 .imePadding(),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
+            // Session controls — not tab-specific, stay visible no matter which tab is open.
             SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
                 DictationMode.entries.forEachIndexed { index, m ->
                     SegmentedButton(
@@ -166,47 +189,64 @@ fun DictationScreen(
 
             HorizontalDivider()
 
-            // One unified stream — spoken (timestamp + speaker) and typed (timestamp, no
-            // speaker) lines interleaved in the order they happened. Used to be two separate
-            // views (a live transcript list, a separate pending-notes preview) showing the same
-            // spoken content twice; merged 2026-09-15 per device-testing feedback, keeping the
-            // timestamp/speaker detail the old transcript view had rather than dropping it.
-            Text("Notes", style = MaterialTheme.typography.titleSmall)
-            LazyColumn(modifier = Modifier.weight(1f)) {
-                items(noteLines) { line -> NoteLineRow(line) }
+            TabRow(selectedTabIndex = selectedTab) {
+                DictationTab.entries.forEachIndexed { index, tab ->
+                    Tab(
+                        selected = selectedTab == index,
+                        onClick = { selectedTab = index },
+                        text = { Text(tab.label) }
+                    )
+                }
+                // Placeholder — see class doc. Disabled, not a working tab yet.
+                Tab(selected = false, onClick = {}, enabled = false, text = { Text("Summary") })
             }
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                OutlinedTextField(
-                    value = typedInput,
-                    onValueChange = { typedInput = it },
-                    modifier = Modifier.weight(1f),
-                    label = { Text("Type a note") },
-                    singleLine = true
-                )
-                Button(onClick = {
-                    viewModel.addTypedText(typedInput)
-                    typedInput = ""
-                }) { Text("Add") }
+            when (DictationTab.entries[selectedTab]) {
+                DictationTab.TRANSCRIPT -> {
+                    // Read-only live view of everything said/typed so far, in order.
+                    LazyColumn(modifier = Modifier.weight(1f)) {
+                        items(noteLines) { line -> NoteLineRow(line) }
+                    }
+                }
+
+                DictationTab.NOTES -> {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = typedInput,
+                            onValueChange = { typedInput = it },
+                            modifier = Modifier.weight(1f),
+                            label = { Text("Type a note") },
+                            singleLine = true
+                        )
+                        Button(onClick = {
+                            viewModel.addTypedText(typedInput)
+                            typedInput = ""
+                        }) { Text("Add") }
+                    }
+
+                    LazyColumn(modifier = Modifier.weight(1f)) {
+                        items(noteLines) { line -> NoteLineRow(line) }
+                    }
+
+                    HorizontalDivider()
+
+                    OutlinedTextField(
+                        value = saveTitle,
+                        onValueChange = { saveTitle = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Title") },
+                        singleLine = true
+                    )
+                    Button(
+                        onClick = { viewModel.saveNotesToOneDrive(saveTitle) },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = saveTitle.isNotBlank() && noteLines.isNotEmpty()
+                    ) { Text("Save") }
+                }
             }
-
-            HorizontalDivider()
-
-            OutlinedTextField(
-                value = saveTitle,
-                onValueChange = { saveTitle = it },
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text("Title") },
-                singleLine = true
-            )
-            Button(
-                onClick = { viewModel.saveNotesToOneDrive(saveTitle) },
-                modifier = Modifier.fillMaxWidth(),
-                enabled = saveTitle.isNotBlank() && noteLines.isNotEmpty()
-            ) { Text("Save") }
         }
     }
 
@@ -237,6 +277,10 @@ fun DictationScreen(
         )
     }
 }
+
+/** "2026-09-16_Note" — today's date, editable before saving. */
+private fun defaultNoteTitle(): String =
+    "${SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())}_Note"
 
 @Composable
 private fun NoteLineRow(line: NoteLine) {

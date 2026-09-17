@@ -144,11 +144,15 @@ class TranscriptionService : Service() {
                 if (finalText != null) {
                     VoiceLog.log("SVC", "accepting [$speakerId]: ${finalText.take(60)}")
                     val entry = TranscriptEntry(timeFormat.format(Date()), speakerId, finalText)
-                    _transcriptEntries.update { current ->
-                        val updated = current + entry
-                        transcriptStore.save(updated)
-                        updated
-                    }
+                    // Persist off to the side, not inside update{}'s transform. transcriptStore.save()
+                    // is a suspend DataStore write (rewrites the whole accumulated transcript blob
+                    // every call, unlike SharedPreferences.apply()'s fire-and-forget) — calling it
+                    // inside update{} means the StateFlow doesn't flip, and nothing collecting it
+                    // (the UI) sees the new entry, until that disk write finishes. Got slower every
+                    // utterance as the transcript grew (2026-09-16 device-testing feedback: felt
+                    // slower than chato). update{} itself must stay synchronous.
+                    val updated = _transcriptEntries.updateAndGet { current -> current + entry }
+                    launch { transcriptStore.save(updated) }
                 }
             }
         }
