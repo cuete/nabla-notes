@@ -86,6 +86,20 @@ private fun NavController.navigateToFile(id: String, kind: FileKind, name: Strin
     navigateToFile(NoteFile(id = id, name = name), gson)
 }
 
+/**
+ * Navigate to Dictation carrying the folder currently being browsed — so a saved note lands
+ * there, not in the app's separately-configured default folder (2026-09-16 device-testing
+ * feedback: "that folder serves a different purpose"). folderPath can be blank (drive root);
+ * "." is a placeholder since Navigation route segments can't reliably be truly empty.
+ */
+private fun NavController.navigateToDictation(folderPath: String) {
+    val encoded = URLEncoder.encode(folderPath.ifBlank { "." }, StandardCharsets.UTF_8.name())
+    navigate("dictation/$encoded")
+}
+
+private fun decodeFolderPath(encoded: String): String =
+    URLDecoder.decode(encoded, StandardCharsets.UTF_8.name()).let { if (it == ".") "" else it }
+
 // ─── Single-Pane Navigation (phones) ─────────────────────────────────────────
 
 @Composable
@@ -109,14 +123,15 @@ private fun SinglePaneLayout(initialNoteJson: String? = null) {
                 onSettingsClick = {
                     navController.navigate("settings")
                 },
-                onDictateClick = {
-                    navController.navigate("dictation")
+                onDictateClick = { folderPath ->
+                    navController.navigateToDictation(folderPath)
                 }
             )
         }
 
-        composable("dictation") {
-            DictationScreen(onBackClick = { navController.popBackStack() })
+        composable("dictation/{folderPath}") { backStackEntry ->
+            val folderPath = decodeFolderPath(backStackEntry.arguments?.getString("folderPath") ?: ".")
+            DictationScreen(folderPath = folderPath, onBackClick = { navController.popBackStack() })
         }
 
         composable("editor/{fileJson}") { backStackEntry ->
@@ -192,8 +207,8 @@ private fun SplitPaneLayout(initialNoteJson: String? = null) {
                         onSettingsClick = {
                             navController.navigate("settings")
                         },
-                        onDictateClick = {
-                            navController.navigate("dictation")
+                        onDictateClick = { folderPath ->
+                            navController.navigateToDictation(folderPath)
                         }
                     )
                 }
@@ -231,8 +246,9 @@ private fun SplitPaneLayout(initialNoteJson: String? = null) {
             )
         }
 
-        composable("dictation") {
-            DictationScreen(onBackClick = { navController.popBackStack() })
+        composable("dictation/{folderPath}") { backStackEntry ->
+            val folderPath = decodeFolderPath(backStackEntry.arguments?.getString("folderPath") ?: ".")
+            DictationScreen(folderPath = folderPath, onBackClick = { navController.popBackStack() })
         }
 
         composable("settings") {

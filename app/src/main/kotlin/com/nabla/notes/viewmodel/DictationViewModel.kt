@@ -7,7 +7,6 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.nabla.notes.repository.DictationRepository
 import com.nabla.notes.repository.OneDriveRepository
-import com.nabla.notes.repository.SettingsRepository
 import com.nabla.voice.DictationMode
 import com.nabla.voice.TranscriptEntry
 import com.nabla.voice.TranscriptionService
@@ -57,7 +56,6 @@ class DictationViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
     private val dictationRepository: DictationRepository,
     private val oneDriveRepository: OneDriveRepository,
-    private val settingsRepository: SettingsRepository,
 ) : ViewModel() {
 
     private val _mode = MutableStateFlow(DictationMode.NOTES)
@@ -86,6 +84,12 @@ class DictationViewModel @Inject constructor(
     val settings: StateFlow<DictationSettings> = _settings.asStateFlow()
 
     private var activityRef: WeakReference<Activity>? = null
+    // Set by the screen right after navigation, from the folder BrowserViewModel was showing
+    // when Dictate was tapped (2026-09-16 device-testing feedback: saves were landing in the
+    // app's separately-configured default folder — a different, fixed setting — instead of
+    // wherever the user was actually browsing). No fallback to that default on purpose: falling
+    // back to it silently would just reintroduce the same bug in a quieter form.
+    private var saveFolderPath: String? = null
     private var utteranceCollectorJob: Job? = null
     private val serviceConnection = TranscriptionServiceConnection()
     private var serviceIntent: Intent? = null
@@ -111,6 +115,11 @@ class DictationViewModel @Inject constructor(
     /** Call from the hosting Activity so MSAL and OneDrive calls have an Activity reference. */
     fun setActivity(activity: Activity) {
         activityRef = WeakReference(activity)
+    }
+
+    /** Call once from the screen with the folder the user was browsing when Dictate was tapped. */
+    fun setSaveFolder(folderPath: String) {
+        saveFolderPath = folderPath
     }
 
     /** Mode can't change mid-session — the active recognizer engine is fixed for the session. */
@@ -288,9 +297,8 @@ class DictationViewModel @Inject constructor(
     }
 
     // --- Save to OneDrive (Summary tab) ---
-    // Saves into the app's already-configured note folder (SettingsRepository) — dictation
-    // doesn't get its own separate folder setting, it shares the one the file browser uses.
-    // Three targets, matching chato's original transcript/summary/both choice. Summary-involving
+    // Saves into saveFolderPath — see its doc comment. Three targets, matching chato's
+    // original transcript/summary/both choice. Summary-involving
     // saves are unreachable in practice right now (summaryText is always null — see class doc)
     // but built for real rather than stubbed, so nothing needs rewriting once summarization
     // actually exists.
@@ -329,9 +337,12 @@ class DictationViewModel @Inject constructor(
             _saveStatus.update { "Save failed: no Activity to authenticate with" }
             return
         }
+        val folderPath = saveFolderPath ?: run {
+            _saveStatus.update { "Save failed: no folder set (open Dictation from the file browser)" }
+            return
+        }
         viewModelScope.launch {
             try {
-                val folderPath = settingsRepository.settings.first().folderPath
                 val safeTitle = title.replace(Regex("[\\\\/:*?\"<>|]"), "-").trim()
                 oneDriveRepository.createFile(folderPath, "$safeTitle.md", activity).fold(
                     onSuccess = { newFile ->

@@ -78,6 +78,7 @@ private enum class DictationTab(val label: String) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DictationScreen(
+    folderPath: String,
     onBackClick: () -> Unit,
     viewModel: DictationViewModel = hiltViewModel(),
 ) {
@@ -99,6 +100,7 @@ fun DictationScreen(
     var selectedTab by remember { mutableIntStateOf(0) }
 
     LaunchedEffect(Unit) { viewModel.setActivity(activity) }
+    LaunchedEffect(folderPath) { viewModel.setSaveFolder(folderPath) }
 
     LaunchedEffect(saveStatus) {
         saveStatus?.let {
@@ -142,7 +144,12 @@ fun DictationScreen(
                 }
             )
         },
-        snackbarHost = { SnackbarHost(snackbarHostState) }
+        snackbarHost = { SnackbarHost(snackbarHostState) },
+        // Same as EditorScreen: without this, Scaffold's own default inset handling interacts
+        // with the child Column's imePadding() below and the keyboard ends up covering content
+        // anyway (2026-09-16 device-testing feedback: Title box on Summary tab). Opting out here
+        // makes imePadding() the sole source of truth for the IME inset.
+        contentWindowInsets = androidx.compose.foundation.layout.WindowInsets(0)
     ) { innerPadding ->
         Column(
             modifier = Modifier

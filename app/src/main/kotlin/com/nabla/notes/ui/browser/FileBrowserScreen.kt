@@ -81,7 +81,7 @@ fun FileBrowserScreen(
     viewModel: BrowserViewModel,
     onFileSelected: (NoteFile) -> Unit,
     onSettingsClick: () -> Unit,
-    onDictateClick: () -> Unit = {}
+    onDictateClick: (folderPath: String) -> Unit = {}
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val currentPath by viewModel.currentPath.collectAsState()
@@ -123,7 +123,7 @@ fun FileBrowserScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = onDictateClick) {
+                    IconButton(onClick = { onDictateClick(viewModel.currentFolderPath()) }) {
                         Icon(
                             imageVector = Icons.Filled.Mic,
                             contentDescription = "Dictate"

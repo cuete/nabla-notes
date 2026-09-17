@@ -3,10 +3,8 @@ package com.nabla.notes.viewmodel
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
-import com.nabla.notes.model.AppSettings
 import com.nabla.notes.repository.DictationRepository
 import com.nabla.notes.repository.OneDriveRepository
-import com.nabla.notes.repository.SettingsRepository
 import com.nabla.voice.TranscriptEntry
 import com.nabla.voice.TranscriptionService
 import io.mockk.*
@@ -14,7 +12,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.*
 import org.junit.After
 import org.junit.Assert.*
@@ -40,7 +37,6 @@ class DictationViewModelTest {
     private val context = mockk<Context>(relaxed = true)
     private val dictationRepository = mockk<DictationRepository>(relaxed = true)
     private val oneDriveRepository = mockk<OneDriveRepository>(relaxed = true)
-    private val settingsRepository = mockk<SettingsRepository>(relaxed = true)
 
     @Before
     fun setup() {
@@ -50,14 +46,13 @@ class DictationViewModelTest {
         coEvery { dictationRepository.contextNotes() } returns ""
         coEvery { dictationRepository.azureSpeechKey() } returns ""
         coEvery { dictationRepository.azureSpeechRegion() } returns "eastus"
-        every { settingsRepository.settings } returns flowOf(AppSettings(folderPath = "Notes", folderId = "root"))
         every { context.applicationContext } returns context
         every { context.packageName } returns "com.nabla.notes"
         // init's passive reattach check must not find a running service by default — individual
         // tests that want a fresh startSession() to succeed re-stub this with flags=AUTO_CREATE.
         every { context.bindService(any(), any(), any<Int>()) } returns false
 
-        viewModel = DictationViewModel(context, dictationRepository, oneDriveRepository, settingsRepository)
+        viewModel = DictationViewModel(context, dictationRepository, oneDriveRepository)
         testDispatcher.scheduler.advanceUntilIdle()
     }
 
@@ -140,7 +135,7 @@ class DictationViewModelTest {
             true
         }
 
-        val reattached = DictationViewModel(context, dictationRepository, oneDriveRepository, settingsRepository)
+        val reattached = DictationViewModel(context, dictationRepository, oneDriveRepository)
         testDispatcher.scheduler.advanceUntilIdle()
 
         assertEquals(DictationSessionState.Recording, reattached.state.value)
@@ -203,7 +198,34 @@ class DictationViewModelTest {
     }
 
     @Test
-    fun `saveTranscriptToOneDrive formats timestamp and speaker per line, creates then writes the file`() {
+    fun `saveTranscriptToOneDrive fails clearly when no folder was set, rather than falling back silently`() {
+        val activity = mockk<android.app.Activity>(relaxed = true)
+        viewModel.setActivity(activity)
+
+        val mockService = mockk<TranscriptionService>(relaxed = true)
+        every { mockService.transcriptEntries } returns MutableStateFlow(listOf(TranscriptEntry("10:00:01", "You", "hi")))
+        every { mockService.isRecording } returns MutableStateFlow(true)
+        every { mockService.error } returns MutableSharedFlow()
+        val binder = mockk<TranscriptionService.TranscriptionBinder>()
+        every { binder.getService() } returns mockService
+        every { context.bindService(any(), any(), 0) } answers {
+            secondArg<ServiceConnection>().onServiceConnected(mockk(relaxed = true), binder)
+            true
+        }
+        val reattached = DictationViewModel(context, dictationRepository, oneDriveRepository)
+        reattached.setActivity(activity)
+        testDispatcher.scheduler.advanceUntilIdle()
+        // Deliberately never calling reattached.setSaveFolder(...).
+
+        reattached.saveTranscriptToOneDrive("title")
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        confirmVerified(oneDriveRepository)
+        assertTrue(reattached.saveStatus.value?.contains("no folder set") == true)
+    }
+
+    @Test
+    fun `saveTranscriptToOneDrive saves into the folder set by setSaveFolder, not any default`() {
         val activity = mockk<android.app.Activity>(relaxed = true)
         viewModel.setActivity(activity)
 
@@ -218,20 +240,22 @@ class DictationViewModelTest {
             secondArg<ServiceConnection>().onServiceConnected(mockk(relaxed = true), binder)
             true
         }
-        val reattached = DictationViewModel(context, dictationRepository, oneDriveRepository, settingsRepository)
+        val reattached = DictationViewModel(context, dictationRepository, oneDriveRepository)
         reattached.setActivity(activity)
+        // The folder the file browser happened to be showing — not any app-wide default.
+        reattached.setSaveFolder("Projects/2026")
         testDispatcher.scheduler.advanceUntilIdle()
 
         val expectedContent = "[10:00:01] You: hello world"
         val newFile = com.nabla.notes.model.NoteFile(id = "abc123", name = "title.md", lastModified = "")
-        coEvery { oneDriveRepository.createFile("Notes", "title.md", activity) } returns Result.success(newFile)
+        coEvery { oneDriveRepository.createFile("Projects/2026", "title.md", activity) } returns Result.success(newFile)
         coEvery { oneDriveRepository.saveFileContent("abc123", expectedContent, activity) } returns Result.success(Unit)
 
         reattached.saveTranscriptToOneDrive("title")
         testDispatcher.scheduler.advanceUntilIdle()
 
-        coVerify { oneDriveRepository.createFile("Notes", "title.md", activity) }
+        coVerify { oneDriveRepository.createFile("Projects/2026", "title.md", activity) }
         coVerify { oneDriveRepository.saveFileContent("abc123", expectedContent, activity) }
-        assertEquals("Saved to Notes/title.md", reattached.saveStatus.value)
+        assertEquals("Saved to Projects/2026/title.md", reattached.saveStatus.value)
     }
 }

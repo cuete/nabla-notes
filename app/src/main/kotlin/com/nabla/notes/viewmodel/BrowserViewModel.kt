@@ -161,7 +161,7 @@ class BrowserViewModel @Inject constructor(
      * OneDrive-root-relative path of the folder currently being browsed, combining the
      * configured root folder path with any subfolder stack navigation.
      */
-    private fun currentFolderPath(): String {
+    fun currentFolderPath(): String {
         val base = settings.value.folderPath
         if (_folderStack.value.isEmpty()) return base
         val subPath = _folderStack.value.joinToString("/") { it.second }
