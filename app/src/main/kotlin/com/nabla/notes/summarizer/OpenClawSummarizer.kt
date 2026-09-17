@@ -75,9 +75,19 @@ class OpenClawSummarizer @Inject constructor(
         }
     }
 
-    private fun buildPrompt(transcript: List<TranscriptEntry>, notes: String): String = buildString {
+    /**
+     * The instruction itself is written in Spanish (matches how Alejandro talks to his own
+     * tools), but that's just the language the instruction happens to be phrased in — it's not
+     * what the model should reply in. Without the explicit line below, the model was defaulting
+     * to Spanish for every summary regardless of what language the transcript/notes were
+     * actually in (2026-09-16 feedback). Separating "what language am I instructed in" from
+     * "what language should the content be" is the actual fix — not detecting the language in
+     * app code, which would just be reimplementing what the model already does natively.
+     */
+    internal fun buildPrompt(transcript: List<TranscriptEntry>, notes: String): String = buildString {
         appendLine("Sos un asistente que resume una sesión de dictado (transcripción de voz y notas escritas) en un resumen claro y organizado.")
         appendLine("Incluí: resumen general, puntos clave, y próximos pasos si los hay.")
+        appendLine("IMPORTANTE: Respondé en el mismo idioma del contenido de abajo (transcripción y notas) — si está en inglés, respondé en inglés; si está en español, respondé en español; si está mezclado, usá el idioma predominante. No traduzcas el contenido a otro idioma.")
         appendLine()
         if (notes.isNotBlank()) {
             appendLine("Notas escritas durante la sesión:")
