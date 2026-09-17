@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -23,6 +24,7 @@ import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -64,10 +66,10 @@ import java.util.Locale
 /**
  * Transcript / Notes / Summary (2026-09-16 device-testing feedback, mirroring chato's original
  * tab split). Notes is deliberately just a typed-text box, independent of the transcript — the
- * two get combined only as separate fields in a future summarizer payload, not merged into one
- * stream beforehand (an earlier round tried that unification; reverted). Summary is real UI —
- * not a stub screen — but its Summarize button stays disabled until the provider-agnostic
- * summarizer phase exists; see DictationViewModel's class doc.
+ * two get combined only as separate fields sent to the summarizer, not merged into one stream
+ * beforehand (an earlier round tried that unification; reverted). Summary's Summarize button
+ * is real now (P5) — calls the provider-agnostic Summarizer seam; see DictationViewModel's
+ * class doc.
  */
 private enum class DictationTab(val label: String) {
     TRANSCRIPT("Transcript"),
@@ -91,7 +93,9 @@ fun DictationScreen(
     val transcriptEntries by viewModel.transcriptEntries.collectAsState()
     val typedNotes by viewModel.typedNotes.collectAsState()
     val summaryText by viewModel.summaryText.collectAsState()
+    val isSummarizing by viewModel.isSummarizing.collectAsState()
     val saveStatus by viewModel.saveStatus.collectAsState()
+    val error by viewModel.error.collectAsState()
     val settings by viewModel.settings.collectAsState()
 
     var showSettingsDialog by remember { mutableStateOf(false) }
@@ -106,6 +110,15 @@ fun DictationScreen(
         saveStatus?.let {
             snackbarHostState.showSnackbar(it)
             viewModel.clearSaveStatus()
+        }
+    }
+
+    // error was previously never surfaced anywhere in this screen — summarize() now writes
+    // into it, so a failed call needs somewhere to actually show up.
+    LaunchedEffect(error) {
+        error?.let {
+            snackbarHostState.showSnackbar(it)
+            viewModel.dismissError()
         }
     }
 
@@ -226,15 +239,17 @@ fun DictationScreen(
 
                 DictationTab.SUMMARY -> {
                     Button(
-                        onClick = {},
-                        enabled = false,
+                        onClick = { viewModel.summarize() },
+                        enabled = !isSummarizing && (transcriptEntries.isNotEmpty() || typedNotes.isNotBlank()),
                         modifier = Modifier.fillMaxWidth()
-                    ) { Text("Summarize") }
-                    Text(
-                        "Summarization isn't implemented yet.",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    ) {
+                        if (isSummarizing) {
+                            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                            Text("  Summarizing…")
+                        } else {
+                            Text("Summarize")
+                        }
+                    }
 
                     HorizontalDivider()
 
@@ -293,9 +308,12 @@ fun DictationScreen(
         DictationSettingsDialog(
             initialKey = settings.azureSpeechKey,
             initialRegion = settings.azureSpeechRegion,
+            initialGatewayUrl = settings.gatewayUrl,
+            initialGatewayToken = settings.gatewayToken,
             onDismiss = { showSettingsDialog = false },
-            onSave = { key, region ->
+            onSave = { key, region, gatewayUrl, gatewayToken ->
                 viewModel.saveAzureSettings(key, region)
+                viewModel.saveGatewaySettings(gatewayUrl, gatewayToken)
                 showSettingsDialog = false
             }
         )
@@ -322,11 +340,15 @@ private fun TranscriptEntryRow(entry: TranscriptEntry) {
 private fun DictationSettingsDialog(
     initialKey: String,
     initialRegion: String,
+    initialGatewayUrl: String,
+    initialGatewayToken: String,
     onDismiss: () -> Unit,
-    onSave: (key: String, region: String) -> Unit,
+    onSave: (key: String, region: String, gatewayUrl: String, gatewayToken: String) -> Unit,
 ) {
     var key by remember { mutableStateOf(initialKey) }
     var region by remember { mutableStateOf(initialRegion) }
+    var gatewayUrl by remember { mutableStateOf(initialGatewayUrl) }
+    var gatewayToken by remember { mutableStateOf(initialGatewayToken) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -345,9 +367,29 @@ private fun DictationSettingsDialog(
                     label = { Text("Azure Speech region") },
                     singleLine = true
                 )
+                HorizontalDivider()
+                Text(
+                    "Summarization gateway",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                OutlinedTextField(
+                    value = gatewayUrl,
+                    onValueChange = { gatewayUrl = it },
+                    label = { Text("Gateway URL") },
+                    singleLine = true
+                )
+                OutlinedTextField(
+                    value = gatewayToken,
+                    onValueChange = { gatewayToken = it },
+                    label = { Text("Gateway token") },
+                    singleLine = true
+                )
             }
         },
-        confirmButton = { TextButton(onClick = { onSave(key, region) }) { Text("Save") } },
+        confirmButton = {
+            TextButton(onClick = { onSave(key, region, gatewayUrl, gatewayToken) }) { Text("Save") }
+        },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
     )
 }

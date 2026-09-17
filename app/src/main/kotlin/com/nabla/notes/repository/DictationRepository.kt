@@ -35,6 +35,8 @@ class DictationRepository @Inject constructor(
     companion object {
         private val KEY_AZURE_SPEECH_KEY = stringPreferencesKey("dictation_azure_speech_key")
         private val KEY_AZURE_SPEECH_REGION = stringPreferencesKey("dictation_azure_speech_region")
+        private val KEY_GATEWAY_URL = stringPreferencesKey("dictation_gateway_url")
+        private val KEY_GATEWAY_TOKEN = stringPreferencesKey("dictation_gateway_token")
         private val KEY_CONTEXT_NOTES = stringPreferencesKey("dictation_context_notes")
         private val KEY_TYPED_NOTES = stringPreferencesKey("dictation_typed_notes")
         private val KEY_TRANSCRIPT = stringPreferencesKey("dictation_transcript")
@@ -51,6 +53,16 @@ class DictationRepository @Inject constructor(
         }
     }
 
+    suspend fun gatewayUrl(): String = pref(KEY_GATEWAY_URL, "")
+    suspend fun gatewayToken(): String = pref(KEY_GATEWAY_TOKEN, "")
+
+    suspend fun saveGatewaySettings(url: String, token: String) {
+        dataStore.edit { prefs ->
+            prefs[KEY_GATEWAY_URL] = url.trim().trimEnd('/')
+            prefs[KEY_GATEWAY_TOKEN] = token.trim()
+        }
+    }
+
     suspend fun contextNotes(): String = pref(KEY_CONTEXT_NOTES, "")
     suspend fun saveContextNotes(notes: String) {
         dataStore.edit { it[KEY_CONTEXT_NOTES] = notes }
@@ -61,7 +73,7 @@ class DictationRepository @Inject constructor(
         dataStore.edit { it[KEY_TYPED_NOTES] = text }
     }
 
-    /** Clears everything except Azure settings — those are config, not session state. */
+    /** Clears everything except Azure/gateway settings — those are config, not session state. */
     suspend fun clearSession() {
         dataStore.edit { prefs ->
             prefs.remove(KEY_CONTEXT_NOTES)

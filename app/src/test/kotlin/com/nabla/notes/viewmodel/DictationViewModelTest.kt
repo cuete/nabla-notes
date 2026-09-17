@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.ServiceConnection
 import com.nabla.notes.repository.DictationRepository
 import com.nabla.notes.repository.OneDriveRepository
+import com.nabla.notes.summarizer.Summarizer
 import com.nabla.voice.TranscriptEntry
 import com.nabla.voice.TranscriptionService
 import io.mockk.*
@@ -37,6 +38,7 @@ class DictationViewModelTest {
     private val context = mockk<Context>(relaxed = true)
     private val dictationRepository = mockk<DictationRepository>(relaxed = true)
     private val oneDriveRepository = mockk<OneDriveRepository>(relaxed = true)
+    private val summarizer = mockk<Summarizer>(relaxed = true)
 
     @Before
     fun setup() {
@@ -46,13 +48,15 @@ class DictationViewModelTest {
         coEvery { dictationRepository.contextNotes() } returns ""
         coEvery { dictationRepository.azureSpeechKey() } returns ""
         coEvery { dictationRepository.azureSpeechRegion() } returns "eastus"
+        coEvery { dictationRepository.gatewayUrl() } returns ""
+        coEvery { dictationRepository.gatewayToken() } returns ""
         every { context.applicationContext } returns context
         every { context.packageName } returns "com.nabla.notes"
         // init's passive reattach check must not find a running service by default — individual
         // tests that want a fresh startSession() to succeed re-stub this with flags=AUTO_CREATE.
         every { context.bindService(any(), any(), any<Int>()) } returns false
 
-        viewModel = DictationViewModel(context, dictationRepository, oneDriveRepository)
+        viewModel = DictationViewModel(context, dictationRepository, oneDriveRepository, summarizer)
         testDispatcher.scheduler.advanceUntilIdle()
     }
 
@@ -135,7 +139,7 @@ class DictationViewModelTest {
             true
         }
 
-        val reattached = DictationViewModel(context, dictationRepository, oneDriveRepository)
+        val reattached = DictationViewModel(context, dictationRepository, oneDriveRepository, summarizer)
         testDispatcher.scheduler.advanceUntilIdle()
 
         assertEquals(DictationSessionState.Recording, reattached.state.value)
@@ -186,15 +190,87 @@ class DictationViewModelTest {
     }
 
     @Test
-    fun `saveSummaryToOneDrive is a no-op — summaryText is always null until summarization exists`() {
+    fun `saveSummaryToOneDrive is a no-op when nothing has been summarized yet`() {
         viewModel.saveSummaryToOneDrive("title")
         confirmVerified(oneDriveRepository)
     }
 
     @Test
-    fun `saveBothToOneDrive is a no-op — summaryText is always null until summarization exists`() {
+    fun `saveBothToOneDrive is a no-op when nothing has been summarized yet`() {
         viewModel.saveBothToOneDrive("title")
         confirmVerified(oneDriveRepository)
+    }
+
+    // --- Summarize (Summary tab, P5) ---
+
+    @Test
+    fun `summarize is a no-op with no transcript and no typed notes`() {
+        viewModel.summarize()
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        coVerify(exactly = 0) { summarizer.summarize(any(), any()) }
+        assertNull(viewModel.summaryText.value)
+    }
+
+    @Test
+    fun `summarize passes transcript and typed notes separately, not merged`() {
+        viewModel.updateTypedNotes("remember to follow up")
+        // Stubbing with any() rather than the exact expected values — a concrete-value coEvery
+        // here didn't actually apply (fell through to the relaxed default, summaryText stayed
+        // null) even though coVerify with those same concrete values independently confirmed
+        // the call happened with them. Verify separately below instead, where it's reliable.
+        coEvery { summarizer.summarize(any(), any()) } returns Result.success("summary")
+
+        // No transcript entries in this ViewModel instance, but typed notes alone are enough
+        // to make summarize() proceed — matches its no-op guard (transcript.isEmpty() &&
+        // notes.isBlank()), not requiring both.
+        viewModel.summarize()
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        coVerify { summarizer.summarize(emptyList(), "remember to follow up") }
+        assertEquals("summary", viewModel.summaryText.value)
+    }
+
+    @Test
+    fun `summarize sets isSummarizing true while in flight, false after`() {
+        viewModel.updateTypedNotes("notes")
+        coEvery { summarizer.summarize(any(), any()) } coAnswers {
+            assertTrue(viewModel.isSummarizing.value)
+            Result.success("done")
+        }
+
+        assertFalse(viewModel.isSummarizing.value)
+        viewModel.summarize()
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        assertFalse(viewModel.isSummarizing.value)
+    }
+
+    @Test
+    fun `summarize failure surfaces through error, leaves summaryText null`() {
+        viewModel.updateTypedNotes("notes")
+        coEvery { summarizer.summarize(any(), any()) } returns Result.failure(RuntimeException("gateway down"))
+
+        viewModel.summarize()
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        assertNull(viewModel.summaryText.value)
+        assertTrue(viewModel.error.value?.contains("gateway down") == true)
+    }
+
+    @Test
+    fun `summarize while already summarizing is a no-op`() {
+        viewModel.updateTypedNotes("notes")
+        coEvery { summarizer.summarize(any(), any()) } coAnswers {
+            // Re-entrant call while the first is still in flight.
+            viewModel.summarize()
+            Result.success("done")
+        }
+
+        viewModel.summarize()
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        coVerify(exactly = 1) { summarizer.summarize(any(), any()) }
     }
 
     @Test
@@ -212,7 +288,7 @@ class DictationViewModelTest {
             secondArg<ServiceConnection>().onServiceConnected(mockk(relaxed = true), binder)
             true
         }
-        val reattached = DictationViewModel(context, dictationRepository, oneDriveRepository)
+        val reattached = DictationViewModel(context, dictationRepository, oneDriveRepository, summarizer)
         reattached.setActivity(activity)
         testDispatcher.scheduler.advanceUntilIdle()
         // Deliberately never calling reattached.setSaveFolder(...).
@@ -240,7 +316,7 @@ class DictationViewModelTest {
             secondArg<ServiceConnection>().onServiceConnected(mockk(relaxed = true), binder)
             true
         }
-        val reattached = DictationViewModel(context, dictationRepository, oneDriveRepository)
+        val reattached = DictationViewModel(context, dictationRepository, oneDriveRepository, summarizer)
         reattached.setActivity(activity)
         // The folder the file browser happened to be showing — not any app-wide default.
         reattached.setSaveFolder("Projects/2026")

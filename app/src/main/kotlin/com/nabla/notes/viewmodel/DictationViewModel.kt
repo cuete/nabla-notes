@@ -7,6 +7,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.nabla.notes.repository.DictationRepository
 import com.nabla.notes.repository.OneDriveRepository
+import com.nabla.notes.summarizer.Summarizer
 import com.nabla.voice.DictationMode
 import com.nabla.voice.TranscriptEntry
 import com.nabla.voice.TranscriptionService
@@ -31,13 +32,13 @@ import javax.inject.Inject
  * "service owns the session" design and commit history for the reattach logic, both carried
  * over unchanged here).
  *
- * Deliberately NOT implemented: real summarization. summaryText always stays null — it's the
- * seam for the provider-agnostic summarizer (a separate, not-yet-built phase; see the Summary
- * tab in DictationScreen, its Summarize button disabled until that phase lands). transcriptEntries
- * and typedNotes are what will become that summarizer's input payload once it exists — kept as
- * two independent fields rather than merged into one stream, per 2026-09-16 device-testing
- * feedback (an earlier round tried unifying them into one NoteLine list; reverted — the Notes
- * tab is "just a box", independent of the transcript, not interleaved with it).
+ * Real summarization (P5): summarize() calls the injected [Summarizer] with transcriptEntries
+ * and typedNotes kept as two separate arguments, not pre-merged — matches 2026-09-16
+ * device-testing feedback (an earlier round tried unifying them into one NoteLine list;
+ * reverted — the Notes tab is "just a box", independent of the transcript, not interleaved
+ * with it). Not ported from chato: its organizeNotes()/summarize() called the OpenClaw gateway
+ * directly with a hardcoded prompt in the ViewModel — that provider coupling is exactly what
+ * the Summarizer interface exists to avoid. See Summarizer's class doc.
  */
 sealed class DictationSessionState {
     object Idle : DictationSessionState()
@@ -49,6 +50,8 @@ sealed class DictationSessionState {
 data class DictationSettings(
     val azureSpeechKey: String = "",
     val azureSpeechRegion: String = "eastus",
+    val gatewayUrl: String = "",
+    val gatewayToken: String = "",
 )
 
 @HiltViewModel
@@ -56,6 +59,7 @@ class DictationViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
     private val dictationRepository: DictationRepository,
     private val oneDriveRepository: OneDriveRepository,
+    private val summarizer: Summarizer,
 ) : ViewModel() {
 
     private val _mode = MutableStateFlow(DictationMode.NOTES)
@@ -70,9 +74,11 @@ class DictationViewModel @Inject constructor(
     private val _typedNotes = MutableStateFlow("")
     val typedNotes: StateFlow<String> = _typedNotes.asStateFlow()
 
-    /** Always null until the summarizer phase exists — see class doc. */
     private val _summaryText = MutableStateFlow<String?>(null)
     val summaryText: StateFlow<String?> = _summaryText.asStateFlow()
+
+    private val _isSummarizing = MutableStateFlow(false)
+    val isSummarizing: StateFlow<Boolean> = _isSummarizing.asStateFlow()
 
     private val _saveStatus = MutableStateFlow<String?>(null)
     val saveStatus: StateFlow<String?> = _saveStatus.asStateFlow()
@@ -296,12 +302,28 @@ class DictationViewModel @Inject constructor(
         _saveStatus.update { null }
     }
 
+    // --- Summarize (Summary tab) ---
+
+    /** No-op while already summarizing, or with nothing to summarize. */
+    fun summarize() {
+        if (_isSummarizing.value) return
+        val transcript = _transcriptEntries.value
+        val notes = _typedNotes.value
+        if (transcript.isEmpty() && notes.isBlank()) return
+
+        viewModelScope.launch {
+            _isSummarizing.update { true }
+            summarizer.summarize(transcript, notes).fold(
+                onSuccess = { summary -> _summaryText.update { summary } },
+                onFailure = { e -> _error.update { "Summarize failed: ${e.message}" } },
+            )
+            _isSummarizing.update { false }
+        }
+    }
+
     // --- Save to OneDrive (Summary tab) ---
     // Saves into saveFolderPath — see its doc comment. Three targets, matching chato's
-    // original transcript/summary/both choice. Summary-involving
-    // saves are unreachable in practice right now (summaryText is always null — see class doc)
-    // but built for real rather than stubbed, so nothing needs rewriting once summarization
-    // actually exists.
+    // original transcript/summary/both choice.
 
     fun saveTranscriptToOneDrive(title: String) {
         val entries = _transcriptEntries.value
@@ -366,6 +388,8 @@ class DictationViewModel @Inject constructor(
             DictationSettings(
                 azureSpeechKey = dictationRepository.azureSpeechKey(),
                 azureSpeechRegion = dictationRepository.azureSpeechRegion(),
+                gatewayUrl = dictationRepository.gatewayUrl(),
+                gatewayToken = dictationRepository.gatewayToken(),
             )
         }
     }
@@ -373,6 +397,13 @@ class DictationViewModel @Inject constructor(
     fun saveAzureSettings(key: String, region: String) {
         viewModelScope.launch {
             dictationRepository.saveAzureSettings(key, region)
+            loadSettings()
+        }
+    }
+
+    fun saveGatewaySettings(url: String, token: String) {
+        viewModelScope.launch {
+            dictationRepository.saveGatewaySettings(url, token)
             loadSettings()
         }
     }
