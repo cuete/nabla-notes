@@ -2,6 +2,7 @@ package com.nabla.notes.ui.browser
 
 import android.app.Activity
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -18,6 +19,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -66,6 +68,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -383,6 +387,36 @@ fun FileBrowserScreen(
 
 // ─── File Card ────────────────────────────────────────────────────────────────
 
+// Fixed accent colors per entry kind — consistent across light/dark theme so folders and file
+// types stay scannable by color, not just by icon shape.
+private val FolderColor = Color(0xFFFFA726)
+private fun fileKindColor(kind: FileKind): Color = when (kind) {
+    FileKind.MARKDOWN -> Color(0xFF42A5F5)
+    FileKind.TEXT -> Color(0xFF78909C)
+    FileKind.IMAGE -> Color(0xFF66BB6A)
+    FileKind.PDF -> Color(0xFFEF5350)
+    FileKind.OTHER -> Color(0xFFAB47BC)
+}
+
+/** Icon on a soft tinted circular background — the color badge that makes kind scannable at a glance. */
+@Composable
+private fun EntryIconBadge(icon: androidx.compose.ui.graphics.vector.ImageVector, description: String, color: Color) {
+    Box(
+        modifier = Modifier
+            .size(36.dp)
+            .clip(CircleShape)
+            .background(color.copy(alpha = 0.16f)),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = description,
+            tint = color,
+            modifier = Modifier.size(20.dp)
+        )
+    }
+}
+
 // ─── Folder Card ────────────────────────────────────────────────────────────────────────────
 
 @Composable
@@ -401,12 +435,7 @@ private fun FolderEntryCard(folder: FolderItem, onClick: () -> Unit) {
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(
-                imageVector = Icons.Filled.Folder,
-                contentDescription = "Folder",
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(24.dp)
-            )
+            EntryIconBadge(Icons.Filled.Folder, "Folder", FolderColor)
             Spacer(modifier = Modifier.width(12.dp))
             Text(
                 text = folder.name,
@@ -447,12 +476,7 @@ private fun NoteFileCard(
                 FileKind.PDF -> Icons.Filled.PictureAsPdf to "PDF file"
                 FileKind.OTHER -> Icons.Filled.InsertDriveFile to "File"
             }
-            Icon(
-                imageVector = icon,
-                contentDescription = description,
-                modifier = Modifier.size(24.dp),
-                tint = MaterialTheme.colorScheme.primary
-            )
+            EntryIconBadge(icon, description, fileKindColor(noteFile.kind))
             Spacer(modifier = Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
