@@ -13,6 +13,7 @@ import com.nabla.notes.model.FileKind
 import com.nabla.notes.model.MarkdownAction
 import com.nabla.notes.model.NoteFile
 import com.nabla.notes.repository.OneDriveRepository
+import com.nabla.notes.repository.SettingsRepository
 import com.nabla.notes.summarizer.Summarizer
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -69,7 +70,8 @@ sealed class OrganizeState {
 class EditorViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
     private val oneDriveRepository: OneDriveRepository,
-    private val summarizer: Summarizer
+    private val summarizer: Summarizer,
+    private val settingsRepository: SettingsRepository
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow<EditorUiState>(EditorUiState.Idle)
@@ -82,6 +84,27 @@ class EditorViewModel @Inject constructor(
     /** Whether we are in markdown preview mode (vs raw text edit mode). */
     private val _isMarkdownPreview = MutableStateFlow(false)
     val isMarkdownPreview: StateFlow<Boolean> = _isMarkdownPreview.asStateFlow()
+
+    /** Raw-text editor font size (sp), persisted via [SettingsRepository]. */
+    private val _fontSize = MutableStateFlow(SettingsRepository.DEFAULT_EDITOR_FONT_SIZE)
+    val fontSize: StateFlow<Float> = _fontSize.asStateFlow()
+
+    init {
+        viewModelScope.launch {
+            settingsRepository.editorFontSize.collect { _fontSize.value = it }
+        }
+    }
+
+    /** Step the editor font size up/down by [FONT_SIZE_STEP] sp, clamped to a readable range. */
+    fun increaseFontSize() = adjustFontSize(FONT_SIZE_STEP)
+    fun decreaseFontSize() = adjustFontSize(-FONT_SIZE_STEP)
+
+    private fun adjustFontSize(delta: Float) {
+        val newSize = (_fontSize.value + delta).coerceIn(MIN_FONT_SIZE, MAX_FONT_SIZE)
+        if (newSize == _fontSize.value) return
+        _fontSize.value = newSize
+        viewModelScope.launch { settingsRepository.setEditorFontSize(newSize) }
+    }
 
     /** The file currently being edited. */
     private val _currentFile = MutableStateFlow<NoteFile?>(null)
@@ -139,6 +162,9 @@ class EditorViewModel @Inject constructor(
 
     private companion object {
         const val AUTOSAVE_DELAY_MS = 2000L
+        const val FONT_SIZE_STEP = 2f
+        const val MIN_FONT_SIZE = 10f
+        const val MAX_FONT_SIZE = 30f
     }
 
     // ─── Undo / Redo ─────────────────────────────────────────────────────────────

@@ -3,6 +3,7 @@ package com.nabla.notes.repository
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.nabla.notes.model.AppSettings
 import kotlinx.coroutines.flow.Flow
@@ -26,6 +27,9 @@ class SettingsRepository @Inject constructor(
         private val KEY_FOLDER_PATH = stringPreferencesKey("folder_path")
         private val KEY_FOLDER_ID = stringPreferencesKey("folder_id")
         private val KEY_LAST_FOLDER_STACK = stringPreferencesKey("last_folder_stack")
+        private val KEY_EDITOR_FONT_SIZE = floatPreferencesKey("editor_font_size")
+
+        const val DEFAULT_EDITOR_FONT_SIZE = 14f
     }
 
     /** Observe current settings as a Flow. */
@@ -72,5 +76,14 @@ class SettingsRepository @Inject constructor(
         } catch (e: Exception) {
             emptyList()
         }
+    }
+
+    /** Raw-text editor font size in sp, persisted across sessions. */
+    val editorFontSize: Flow<Float> = dataStore.data.map { prefs ->
+        prefs[KEY_EDITOR_FONT_SIZE] ?: DEFAULT_EDITOR_FONT_SIZE
+    }
+
+    suspend fun setEditorFontSize(sizeSp: Float) {
+        dataStore.edit { prefs -> prefs[KEY_EDITOR_FONT_SIZE] = sizeSp }
     }
 }

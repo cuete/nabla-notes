@@ -51,6 +51,8 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.ZoomIn
+import androidx.compose.material.icons.filled.ZoomOut
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -178,6 +180,7 @@ fun EditorScreen(
     val isMarkdownPreview by viewModel.isMarkdownPreview.collectAsState()
     val isUploadingPhoto by viewModel.isUploadingPhoto.collectAsState()
     val organizeState by viewModel.organizeState.collectAsState()
+    val fontSize by viewModel.fontSize.collectAsState()
     val activity = LocalContext.current as Activity
     val snackbarHostState = remember { SnackbarHostState() }
     val coroutineScope = rememberCoroutineScope()
@@ -332,6 +335,15 @@ fun EditorScreen(
                             )
                         }
                     }
+                    // Font size zoom — only meaningful while editing raw text.
+                    if (!isMarkdownPreview) {
+                        IconButton(onClick = { viewModel.decreaseFontSize() }) {
+                            Icon(Icons.Filled.ZoomOut, contentDescription = "Decrease text size")
+                        }
+                        IconButton(onClick = { viewModel.increaseFontSize() }) {
+                            Icon(Icons.Filled.ZoomIn, contentDescription = "Increase text size")
+                        }
+                    }
                     // Organize — AI cleanup of the whole note; shows a proposal to Apply/Discard.
                     IconButton(
                         onClick = { viewModel.organize() },
@@ -400,6 +412,7 @@ fun EditorScreen(
                                 textFieldValue = textFieldValue,
                                 onValueChange = { viewModel.updateTextFieldValue(it, activity) },
                                 focusRequester = editorFocusRequester,
+                                fontSize = fontSize,
                                 modifier = Modifier
                                     .weight(1f)
                                     .background(MaterialTheme.colorScheme.surface)
@@ -633,6 +646,7 @@ private fun NoteEditor(
     textFieldValue: TextFieldValue,
     onValueChange: (TextFieldValue) -> Unit,
     focusRequester: FocusRequester,
+    fontSize: Float,
     modifier: Modifier = Modifier
 ) {
     val scrollState = rememberScrollState()
@@ -649,7 +663,7 @@ private fun NoteEditor(
             .padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 16.dp),
         textStyle = TextStyle(
             fontFamily = FontFamily.Monospace,
-            fontSize = 14.sp,
+            fontSize = fontSize.sp,
             color = MaterialTheme.colorScheme.onSurface
         ),
         cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
@@ -659,7 +673,7 @@ private fun NoteEditor(
                     text = "Start writing\u2026",
                     style = TextStyle(
                         fontFamily = FontFamily.Monospace,
-                        fontSize = 14.sp,
+                        fontSize = fontSize.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 )
