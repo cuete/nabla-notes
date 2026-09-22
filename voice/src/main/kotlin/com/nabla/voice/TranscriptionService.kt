@@ -51,7 +51,12 @@ class TranscriptionService : Service() {
 
     private val binder = TranscriptionBinder()
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.US)
+    private val timeFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+
+    // Notes mode stamps every entry with the moment the session started, not per utterance —
+    // TranscriptFormat collapses those into one line/block. Null in Conversation mode, which
+    // keeps per-utterance timestamps.
+    @Volatile private var notesSessionStamp: String? = null
 
     // Source of truth for the session's transcript — see class doc. Seeded from persisted
     // storage in onCreate so a service that outlives its first ViewModel still has history.
@@ -69,6 +74,13 @@ class TranscriptionService : Service() {
     val isRecording = MutableStateFlow(false)
     val error = MutableSharedFlow<String>(extraBufferCapacity = 8)
 
+    // Inline (dictate-at-cursor) sessions bypass the transcript entirely: accepted utterances are
+    // emitted here instead, so they neither show up in the Dictation screen's buffer nor get
+    // persisted with it. Set per start command from EXTRA_INLINE.
+    @Volatile private var inlineSession = false
+    private val _inlineUtterances = MutableSharedFlow<String>(extraBufferCapacity = 64)
+    val inlineUtterances: SharedFlow<String> = _inlineUtterances.asSharedFlow()
+
     // Exactly one of these is non-null at a time, depending on the active DictationMode.
     // The SDK has no shared start/stop interface across ConversationTranscriber (diarized,
     // Conversation mode) and SpeechRecognizer (single-speaker, Notes mode).
@@ -84,9 +96,10 @@ class TranscriptionService : Service() {
         const val EXTRA_AZURE_REGION = "azure_region"
         const val EXTRA_CONTEXT_NOTES = "context_notes"
         const val EXTRA_MODE = "mode"
+        /** True for dictate-at-cursor sessions: utterances go to [inlineUtterances], not the transcript. */
+        const val EXTRA_INLINE = "inline"
         /** Optional PendingIntent for the notification's tap action — see class doc. */
         const val EXTRA_CONTENT_INTENT = "content_intent"
-        private const val NOTES_SPEAKER_ID = "You"
     }
 
     override fun onCreate() {
@@ -105,6 +118,7 @@ class TranscriptionService : Service() {
         val azureRegion = intent?.getStringExtra(EXTRA_AZURE_REGION) ?: ""
         val contextNotes = intent?.getStringExtra(EXTRA_CONTEXT_NOTES) ?: ""
         val mode = DictationMode.fromExtra(intent?.getStringExtra(EXTRA_MODE))
+        inlineSession = intent?.getBooleanExtra(EXTRA_INLINE, false) ?: false
 
         serviceScope.launch {
             startTranscribing(azureKey, azureRegion, contextNotes, mode)
@@ -143,7 +157,11 @@ class TranscriptionService : Service() {
                 val finalText = synchronized(debounceLock) { pendingBySpeaker.remove(speakerId) }
                 if (finalText != null) {
                     VoiceLog.log("SVC", "accepting [$speakerId]: ${finalText.take(60)}")
-                    val entry = TranscriptEntry(timeFormat.format(Date()), speakerId, finalText)
+                    if (inlineSession) {
+                        _inlineUtterances.tryEmit(finalText)
+                        return@launch
+                    }
+                    val entry = TranscriptEntry(notesSessionStamp ?: timeFormat.format(Date()), speakerId, finalText)
                     // Persist off to the side, not inside update{}'s transform. transcriptStore.save()
                     // is a suspend DataStore write (rewrites the whole accumulated transcript blob
                     // every call, unlike SharedPreferences.apply()'s fire-and-forget) — calling it
@@ -181,6 +199,7 @@ class TranscriptionService : Service() {
 
             when (mode) {
                 DictationMode.CONVERSATION -> {
+                    notesSessionStamp = null
                     val ct = ConversationTranscriber(speechConfig, autoDetectConfig, audioConfig)
                     conversationTranscriber = ct
                     seedPhraseList(PhraseListGrammar.fromRecognizer(ct), contextNotes)
@@ -201,6 +220,7 @@ class TranscriptionService : Service() {
                     ct.startTranscribingAsync().get()
                 }
                 DictationMode.NOTES -> {
+                    notesSessionStamp = timeFormat.format(Date())
                     val sr = SpeechRecognizer(speechConfig, autoDetectConfig, audioConfig)
                     speechRecognizer = sr
                     seedPhraseList(PhraseListGrammar.fromRecognizer(sr), contextNotes)
@@ -272,6 +292,7 @@ class TranscriptionService : Service() {
         try { speechRecognizer?.close() } catch (_: Exception) {}
         conversationTranscriber = null
         speechRecognizer = null
+        notesSessionStamp = null
         isRecording.update { false }
         stopForeground(STOP_FOREGROUND_REMOVE)
         try {

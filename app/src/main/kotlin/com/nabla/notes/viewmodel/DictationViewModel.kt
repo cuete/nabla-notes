@@ -12,12 +12,16 @@ import com.nabla.voice.DictationMode
 import com.nabla.voice.TranscriptEntry
 import com.nabla.voice.TranscriptionService
 import com.nabla.voice.TranscriptionServiceConnection
+import com.nabla.voice.formatTranscript
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.filterNotNull
@@ -73,6 +77,11 @@ class DictationViewModel @Inject constructor(
 
     private val _typedNotes = MutableStateFlow("")
     val typedNotes: StateFlow<String> = _typedNotes.asStateFlow()
+
+    // Utterances from inline (dictate-at-cursor) sessions — kept out of transcriptEntries so the
+    // Dictation screen's buffer only holds what was dictated there.
+    private val _inlineUtterances = MutableSharedFlow<String>(extraBufferCapacity = 64)
+    val inlineUtterances: SharedFlow<String> = _inlineUtterances.asSharedFlow()
 
     private val _summaryText = MutableStateFlow<String?>(null)
     val summaryText: StateFlow<String?> = _summaryText.asStateFlow()
@@ -159,6 +168,10 @@ class DictationViewModel @Inject constructor(
         }
 
         launch {
+            svc.inlineUtterances.collect { _inlineUtterances.emit(it) }
+        }
+
+        launch {
             svc.error.collect { msg ->
                 _state.update { DictationSessionState.Error(msg) }
             }
@@ -199,7 +212,8 @@ class DictationViewModel @Inject constructor(
         }
     }
 
-    fun startSession(contextNotes: String = "") {
+    /** [inline] = dictate-at-cursor: utterances go to [inlineUtterances], not the transcript. */
+    fun startSession(contextNotes: String = "", inline: Boolean = false) {
         val azureKey = _settings.value.azureSpeechKey
         val azureRegion = _settings.value.azureSpeechRegion
 
@@ -224,6 +238,7 @@ class DictationViewModel @Inject constructor(
             putExtra(TranscriptionService.EXTRA_AZURE_REGION, azureRegion)
             putExtra(TranscriptionService.EXTRA_CONTEXT_NOTES, contextNotes)
             putExtra(TranscriptionService.EXTRA_MODE, _mode.value.name)
+            putExtra(TranscriptionService.EXTRA_INLINE, inline)
         }
         serviceIntent = intent
 
@@ -350,9 +365,6 @@ class DictationViewModel @Inject constructor(
         }
         saveToOneDrive(title, combined)
     }
-
-    private fun formatTranscript(entries: List<TranscriptEntry>): String =
-        entries.joinToString("\n") { "[${it.timestamp}] ${it.speakerId}: ${it.text}" }
 
     private fun saveToOneDrive(title: String, content: String) {
         val activity = activityRef?.get() ?: run {

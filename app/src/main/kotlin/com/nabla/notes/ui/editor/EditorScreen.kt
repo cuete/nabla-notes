@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -44,11 +45,13 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -64,6 +67,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -82,7 +86,12 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.TextFieldValue
@@ -103,12 +112,14 @@ import com.nabla.notes.markdown.relativeLinkResolverPlugin
 import com.nabla.notes.markdown.taskListTogglePlugin
 import com.nabla.notes.model.FileKind
 import com.nabla.notes.model.MarkdownAction
+import com.nabla.notes.ui.common.DictationKeyboardControl
 import com.nabla.notes.viewmodel.DictationSessionState
 import com.nabla.notes.viewmodel.DictationViewModel
 import com.nabla.voice.DictationMode
 import com.nabla.notes.model.NoteFile
 import com.nabla.notes.viewmodel.EditorUiState
 import com.nabla.notes.viewmodel.EditorViewModel
+import com.nabla.notes.viewmodel.OrganizeState
 import io.noties.markwon.Markwon
 import io.noties.markwon.MarkwonVisitor
 import io.noties.markwon.SoftBreakAddsNewLinePlugin
@@ -165,10 +176,27 @@ fun EditorScreen(
     val uiState by viewModel.uiState.collectAsState()
     val textFieldValue by viewModel.textFieldValue.collectAsState()
     val isMarkdownPreview by viewModel.isMarkdownPreview.collectAsState()
+    val isUploadingPhoto by viewModel.isUploadingPhoto.collectAsState()
+    val organizeState by viewModel.organizeState.collectAsState()
     val activity = LocalContext.current as Activity
     val snackbarHostState = remember { SnackbarHostState() }
     val coroutineScope = rememberCoroutineScope()
     var showInsertImageSheet by remember { mutableStateOf(false) }
+
+    // Force a save when the app is minimized and when this screen leaves composition (back,
+    // file switch) instead of waiting out the autosave debounce.
+    // purpose: viewModel/activity are stable for this composition.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, viewModel) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) viewModel.flushSave(activity)
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            viewModel.flushSave(activity)
+        }
+    }
 
     // Load file on first composition or when file changes
     LaunchedEffect(noteFile.id) {
@@ -176,21 +204,23 @@ fun EditorScreen(
     }
 
     // ── Dictate-at-cursor (P4) ──────────────────────────────────────────────────
-    // dictationBaseline is null until this screen's own mic button starts a session —
-    // set even if DictationViewModel's init happened to passively reattach to a session
-    // some OTHER screen started, so a background session never silently starts typing into
-    // whatever note happens to be open. Only entries accepted after this screen explicitly
-    // starts (or resumes control of) recording get inserted.
+    // Sessions started here are "inline": the service routes their utterances to
+    // inlineUtterances instead of the transcript, so nothing dictated at the cursor leaks into
+    // the Dictation screen's buffer, and a session some OTHER screen started never types into
+    // whatever note happens to be open.
     val dictationState by dictationViewModel.state.collectAsState()
-    val transcriptEntries by dictationViewModel.transcriptEntries.collectAsState()
-    var dictationBaseline by remember { mutableStateOf<Int?>(null) }
+    val editorFocusRequester = remember { FocusRequester() }
+    DictationKeyboardControl(
+        recording = dictationState is DictationSessionState.Recording,
+        onRestore = { runCatching { editorFocusRequester.requestFocus() } }
+    )
     val micPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
         if (granted) {
             dictationViewModel.setMode(DictationMode.NOTES)
-            dictationBaseline = transcriptEntries.size
-            dictationViewModel.startSession()
+            viewModel.beginInlineDictation()
+            dictationViewModel.startSession(inline = true)
         } else {
             coroutineScope.launch { snackbarHostState.showSnackbar("Microphone permission is required to dictate.") }
         }
@@ -198,29 +228,48 @@ fun EditorScreen(
 
     LaunchedEffect(Unit) { dictationViewModel.setActivity(activity) }
 
-    LaunchedEffect(transcriptEntries, dictationBaseline) {
-        val baseline = dictationBaseline ?: return@LaunchedEffect
-        if (transcriptEntries.size > baseline) {
-            transcriptEntries.drop(baseline).forEach { entry -> viewModel.insertDictatedText(entry.text, activity) }
-            dictationBaseline = transcriptEntries.size
-        }
+    LaunchedEffect(Unit) {
+        dictationViewModel.inlineUtterances.collect { viewModel.insertDictatedText(it, activity) }
     }
 
     fun toggleDictation() {
         if (dictationState is DictationSessionState.Recording) {
             dictationViewModel.stopSession()
-            dictationBaseline = null
             return
         }
         val hasPermission = activity.checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
         if (hasPermission) {
             dictationViewModel.setMode(DictationMode.NOTES)
-            dictationBaseline = transcriptEntries.size
-            dictationViewModel.startSession()
+            viewModel.beginInlineDictation()
+            dictationViewModel.startSession(inline = true)
         } else {
             micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
         }
+    }
+
+    (organizeState as? OrganizeState.Failed)?.let { failed ->
+        LaunchedEffect(failed) {
+            snackbarHostState.showSnackbar("Organize failed: ${failed.message}")
+            viewModel.dismissOrganize()
+        }
+    }
+    (organizeState as? OrganizeState.Ready)?.let { ready ->
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissOrganize() },
+            title = { Text("Organized note") },
+            text = {
+                Text(
+                    ready.organized,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.heightIn(max = 400.dp).verticalScroll(rememberScrollState())
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { viewModel.applyOrganized(activity) }) { Text("Apply") }
+            },
+            dismissButton = { TextButton(onClick = { viewModel.dismissOrganize() }) { Text("Discard") } }
+        )
     }
 
     // Show "Saved" snackbar on explicit (non-silent) save
@@ -283,6 +332,17 @@ fun EditorScreen(
                             )
                         }
                     }
+                    // Organize — AI cleanup of the whole note; shows a proposal to Apply/Discard.
+                    IconButton(
+                        onClick = { viewModel.organize() },
+                        enabled = organizeState !is OrganizeState.Working && textFieldValue.text.isNotBlank()
+                    ) {
+                        if (organizeState is OrganizeState.Working) {
+                            CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                        } else {
+                            Icon(Icons.Filled.AutoFixHigh, contentDescription = "Organize")
+                        }
+                    }
                     // Toggle preview / edit mode (only for .md files or when in preview)
                     if (noteFile.isMarkdown || isMarkdownPreview) {
                         IconButton(onClick = { viewModel.toggleMarkdownPreview() }) {
@@ -295,7 +355,7 @@ fun EditorScreen(
                 }
             )
         },
-        snackbarHost = { SnackbarHost(snackbarHostState) },
+        snackbarHost = { SnackbarHost(snackbarHostState, modifier = Modifier.navigationBarsPadding()) },
         contentWindowInsets = androidx.compose.foundation.layout.WindowInsets(0)
     ) { innerPadding ->
         Box(
@@ -339,6 +399,7 @@ fun EditorScreen(
                             NoteEditor(
                                 textFieldValue = textFieldValue,
                                 onValueChange = { viewModel.updateTextFieldValue(it, activity) },
+                                focusRequester = editorFocusRequester,
                                 modifier = Modifier
                                     .weight(1f)
                                     .background(MaterialTheme.colorScheme.surface)
@@ -356,6 +417,30 @@ fun EditorScreen(
                                     }
                                 }
                             )
+                        }
+                    }
+                }
+            }
+
+            if (isUploadingPhoto) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.35f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        tonalElevation = 4.dp
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(20.dp))
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Text("Uploading photo…")
                         }
                     }
                 }
@@ -547,6 +632,7 @@ private fun ZoomableImageDialog(
 private fun NoteEditor(
     textFieldValue: TextFieldValue,
     onValueChange: (TextFieldValue) -> Unit,
+    focusRequester: FocusRequester,
     modifier: Modifier = Modifier
 ) {
     val scrollState = rememberScrollState()
@@ -558,6 +644,7 @@ private fun NoteEditor(
         // past the last character on any line still hits the field and places the cursor.
         modifier = modifier
             .fillMaxSize()
+            .focusRequester(focusRequester)
             .verticalScroll(scrollState)
             .padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 16.dp),
         textStyle = TextStyle(
@@ -758,7 +845,10 @@ private fun MarkdownPreview(
 ) {
     val context = LocalContext.current
     val taskCounter = remember { AtomicInteger(0) }
-    var resolvedContent by remember(content) { mutableStateOf(content) }
+    // Held null until media links (photos) finish resolving, so text and images render
+    // together in one pass instead of text appearing first and photos popping in afterward
+    // (which also shifted scroll position once the newly-laid-out images grew the content).
+    var resolvedContent by remember(content) { mutableStateOf<String?>(null) }
     LaunchedEffect(content) { resolvedContent = resolveContent(content) }
     val markwon = remember {
         Markwon.builder(context)
@@ -801,7 +891,15 @@ private fun MarkdownPreview(
             .build()
     }
 
-    val segments = remember(resolvedContent) { splitMarkdownSegments(resolvedContent) }
+    val resolved = resolvedContent
+    if (resolved == null) {
+        Box(modifier = modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
+            CircularProgressIndicator(modifier = Modifier.padding(top = 24.dp))
+        }
+        return
+    }
+
+    val segments = remember(resolved) { splitMarkdownSegments(resolved) }
     // Ordinal of the first checkbox in each segment, so a shared Markwon instance/plugin can
     // report task ordinals consistent with countTaskItems/flipTaskCheckbox over the full content.
     val taskBaseOffsets = remember(segments) {

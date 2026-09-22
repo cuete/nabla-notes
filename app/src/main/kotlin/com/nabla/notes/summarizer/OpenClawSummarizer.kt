@@ -2,6 +2,7 @@ package com.nabla.notes.summarizer
 
 import com.nabla.notes.repository.DictationRepository
 import com.nabla.voice.TranscriptEntry
+import com.nabla.voice.formatTranscript
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -27,14 +28,19 @@ class OpenClawSummarizer @Inject constructor(
     private val httpClient: OkHttpClient,
 ) : Summarizer {
 
-    override suspend fun summarize(transcript: List<TranscriptEntry>, notes: String): Result<String> {
+    override suspend fun summarize(transcript: List<TranscriptEntry>, notes: String): Result<String> =
+        chat(buildPrompt(transcript, notes))
+
+    override suspend fun organize(content: String): Result<String> =
+        chat(buildOrganizePrompt(content))
+
+    private suspend fun chat(prompt: String): Result<String> {
         val url = dictationRepository.gatewayUrl()
         val token = dictationRepository.gatewayToken()
         if (url.isBlank() || token.isBlank()) {
             return Result.failure(IllegalStateException("Gateway URL/token not configured. Open Settings."))
         }
 
-        val prompt = buildPrompt(transcript, notes)
         val bodyJson = JSONObject().apply {
             put("model", MODEL)
             put("user", SESSION_USER)
@@ -98,7 +104,23 @@ class OpenClawSummarizer @Inject constructor(
         }
         appendLine("Transcripción:")
         appendLine("---")
-        appendLine(transcript.joinToString("\n") { "[${it.timestamp}] ${it.speakerId}: ${it.text}" })
+        appendLine(formatTranscript(transcript))
+        append("---")
+    }
+
+    /**
+     * Reorganize-only: same language as the note, no invented content. The reply must be the
+     * note itself (no preamble/fences) since the editor drops it in verbatim on Apply.
+     */
+    internal fun buildOrganizePrompt(content: String): String = buildString {
+        appendLine("Sos un asistente que limpia y reorganiza una nota en markdown.")
+        appendLine("Corregí ortografía y puntuación, agrupá ideas relacionadas, usá encabezados y listas donde ayuden, y eliminá repeticiones. Conservá todos los datos, nombres, números, fechas, links e imágenes (![...](...)) tal cual.")
+        appendLine("NO agregues información nueva ni comentarios tuyos. Respondé en el mismo idioma de la nota, sin traducir.")
+        appendLine("Devolvé ÚNICAMENTE la nota reorganizada en markdown, sin explicación ni bloque de código envolvente.")
+        appendLine()
+        appendLine("Nota:")
+        appendLine("---")
+        appendLine(content)
         append("---")
     }
 }

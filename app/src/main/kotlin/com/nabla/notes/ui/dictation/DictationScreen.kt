@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -51,12 +52,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.nabla.voice.DictationMode
-import com.nabla.voice.TranscriptEntry
+import com.nabla.voice.TranscriptBlock
+import com.nabla.voice.groupTranscript
 import com.nabla.notes.viewmodel.DictationSessionState
+import com.nabla.notes.ui.common.DictationKeyboardControl
 import com.nabla.notes.viewmodel.DictationViewModel
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -129,6 +134,18 @@ fun DictationScreen(
         else scope.launch { snackbarHostState.showSnackbar("Microphone permission is required to dictate.") }
     }
 
+    // Keyboard stays hidden while recording and comes back (into the Notes box, if that tab is
+    // open) when recording stops.
+    val notesFocusRequester = remember { FocusRequester() }
+    DictationKeyboardControl(
+        recording = state is DictationSessionState.Recording,
+        onRestore = {
+            if (DictationTab.entries[selectedTab] == DictationTab.NOTES) {
+                runCatching { notesFocusRequester.requestFocus() }
+            }
+        }
+    )
+
     fun startOrRequestPermission() {
         val hasPermission = activity.checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
@@ -157,7 +174,7 @@ fun DictationScreen(
                 }
             )
         },
-        snackbarHost = { SnackbarHost(snackbarHostState) },
+        snackbarHost = { SnackbarHost(snackbarHostState, modifier = Modifier.navigationBarsPadding()) },
         // Same as EditorScreen: without this, Scaffold's own default inset handling interacts
         // with the child Column's imePadding() below and the keyboard ends up covering content
         // anyway (2026-09-16 device-testing feedback: Title box on Summary tab). Opting out here
@@ -221,7 +238,7 @@ fun DictationScreen(
                     // of which mode (Dictation/Conversation) recorded them, unchanged from
                     // before this round.
                     LazyColumn(modifier = Modifier.weight(1f)) {
-                        items(transcriptEntries) { entry -> TranscriptEntryRow(entry) }
+                        items(groupTranscript(transcriptEntries)) { block -> TranscriptBlockRow(block) }
                     }
                 }
 
@@ -232,7 +249,7 @@ fun DictationScreen(
                     OutlinedTextField(
                         value = typedNotes,
                         onValueChange = { viewModel.updateTypedNotes(it) },
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier.fillMaxSize().focusRequester(notesFocusRequester),
                         label = { Text("Notes") },
                     )
                 }
@@ -325,14 +342,14 @@ private fun defaultNoteTitle(): String =
     "${SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())}_Note"
 
 @Composable
-private fun TranscriptEntryRow(entry: TranscriptEntry) {
+private fun TranscriptBlockRow(block: TranscriptBlock) {
     Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
         Text(
-            text = "[${entry.timestamp}] ${entry.speakerId}: ",
+            text = "[${block.timestamp}] ${block.speakerId}: ",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
-        Text(text = entry.text, style = MaterialTheme.typography.bodySmall)
+        Text(text = block.text, style = MaterialTheme.typography.bodySmall)
     }
 }
 

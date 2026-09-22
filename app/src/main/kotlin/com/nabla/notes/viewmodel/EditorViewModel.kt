@@ -13,10 +13,13 @@ import com.nabla.notes.model.FileKind
 import com.nabla.notes.model.MarkdownAction
 import com.nabla.notes.model.NoteFile
 import com.nabla.notes.repository.OneDriveRepository
+import com.nabla.notes.summarizer.Summarizer
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -28,6 +31,9 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import javax.inject.Inject
 
 /** UI state for the editor screen. */
@@ -38,6 +44,14 @@ sealed class EditorUiState {
     object Saving : EditorUiState()
     object Saved : EditorUiState()
     data class Error(val message: String) : EditorUiState()
+}
+
+/** State of the "Organize" (AI cleanup) action. [Ready] holds a proposal awaiting Apply/Discard. */
+sealed class OrganizeState {
+    object Idle : OrganizeState()
+    object Working : OrganizeState()
+    data class Ready(val organized: String) : OrganizeState()
+    data class Failed(val message: String) : OrganizeState()
 }
 
 /**
@@ -54,7 +68,8 @@ sealed class EditorUiState {
 @HiltViewModel
 class EditorViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val oneDriveRepository: OneDriveRepository
+    private val oneDriveRepository: OneDriveRepository,
+    private val summarizer: Summarizer
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow<EditorUiState>(EditorUiState.Idle)
@@ -75,6 +90,10 @@ class EditorViewModel @Inject constructor(
     /** Images already present in the current file's OneDrive folder (for the insert-photo picker). */
     private val _folderImages = MutableStateFlow<List<NoteFile>>(emptyList())
     val folderImages: StateFlow<List<NoteFile>> = _folderImages.asStateFlow()
+
+    /** True while a picked/captured photo is uploading — drives a progress indicator in the UI. */
+    private val _isUploadingPhoto = MutableStateFlow(false)
+    val isUploadingPhoto: StateFlow<Boolean> = _isUploadingPhoto.asStateFlow()
 
     /** Snapshot of content at last save, used to track unsaved changes. */
     private var savedContent: String = ""
@@ -99,9 +118,27 @@ class EditorViewModel @Inject constructor(
     private fun scheduleAutosave(activity: Activity) {
         autosaveJob?.cancel()
         autosaveJob = viewModelScope.launch {
-            delay(2000L)
+            delay(AUTOSAVE_DELAY_MS)
             if (hasUnsavedChanges) saveFile(activity, silent = true)
         }
+    }
+
+    /**
+     * Save right now if there are unsaved edits, skipping the debounce — called when the app is
+     * minimized or the editor is left, where waiting out [AUTOSAVE_DELAY_MS] would lose edits.
+     * Runs in [flushScope], not viewModelScope: popping the editor clears this ViewModel, which
+     * would cancel an in-flight save started from onDispose.
+     */
+    fun flushSave(activity: Activity) {
+        autosaveJob?.cancel()
+        if (_uiState.value is EditorUiState.Loading || _currentFile.value == null) return
+        if (hasUnsavedChanges) saveFile(activity, silent = true, scope = flushScope)
+    }
+
+    private val flushScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+
+    private companion object {
+        const val AUTOSAVE_DELAY_MS = 2000L
     }
 
     // ─── Undo / Redo ─────────────────────────────────────────────────────────────
@@ -245,6 +282,13 @@ class EditorViewModel @Inject constructor(
         scheduleAutosave(activity)
     }
 
+    private var stampNextDictation = false
+
+    /** Call when an inline dictation session starts, so its first insert is timestamped. */
+    fun beginInlineDictation() {
+        stampNextDictation = true
+    }
+
     /**
      * Insert dictated [text] at the current cursor position, trailing space so consecutive
      * utterances read as one continuous flow rather than running together — matches
@@ -253,7 +297,15 @@ class EditorViewModel @Inject constructor(
     fun insertDictatedText(text: String, activity: Activity) {
         if (text.isBlank()) return
         val current = _textFieldValue.value
-        val insert = "$text "
+        // First insert of a dictation session gets a timestamp (own line if mid-line); later
+        // utterances of the same session flow on without one, like Notes mode.
+        val stamp = if (stampNextDictation) {
+            stampNextDictation = false
+            val atLineStart = current.selection.start == 0 ||
+                current.text[current.selection.start - 1] == '\n'
+            (if (atLineStart) "" else "\n") + "[${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())}] "
+        } else ""
+        val insert = "$stamp$text "
         val newText = current.text.substring(0, current.selection.start) +
             insert +
             current.text.substring(current.selection.end)
@@ -279,6 +331,7 @@ class EditorViewModel @Inject constructor(
             onDone(false)
             return
         }
+        _isUploadingPhoto.value = true
         viewModelScope.launch {
             val extension = when (mimeType) {
                 "image/png" -> "png"
@@ -297,9 +350,13 @@ class EditorViewModel @Inject constructor(
             ).fold(
                 onSuccess = { uploaded ->
                     insertImageLink(uploaded.name, activity)
+                    _isUploadingPhoto.value = false
                     onDone(true)
                 },
-                onFailure = { onDone(false) }
+                onFailure = {
+                    _isUploadingPhoto.value = false
+                    onDone(false)
+                }
             )
         }
     }
@@ -309,7 +366,7 @@ class EditorViewModel @Inject constructor(
      *
      * @param silent If true, no Saving/Saved UI state transitions (for autosave calls).
      */
-    fun saveFile(activity: Activity, silent: Boolean = false) {
+    fun saveFile(activity: Activity, silent: Boolean = false, scope: CoroutineScope = viewModelScope) {
         val file = _currentFile.value ?: return
         val textToSave = _textFieldValue.value.text
 
@@ -317,7 +374,7 @@ class EditorViewModel @Inject constructor(
             _uiState.value = EditorUiState.Saving
         }
 
-        viewModelScope.launch {
+        scope.launch {
             oneDriveRepository.saveFileContent(
                 fileId = file.id,
                 content = textToSave,
@@ -336,6 +393,45 @@ class EditorViewModel @Inject constructor(
                 }
             )
         }
+    }
+
+    // ─── Organize (AI cleanup) ───────────────────────────────────────────────────
+
+    private val _organizeState = MutableStateFlow<OrganizeState>(OrganizeState.Idle)
+    val organizeState: StateFlow<OrganizeState> = _organizeState.asStateFlow()
+
+    /** Ask the summarizer provider to reorganize the note; result waits for [applyOrganized]. */
+    fun organize() {
+        val text = _textFieldValue.value.text
+        if (text.isBlank() || _organizeState.value is OrganizeState.Working) return
+        _organizeState.value = OrganizeState.Working
+        viewModelScope.launch {
+            summarizer.organize(text).fold(
+                onSuccess = { _organizeState.value = OrganizeState.Ready(stripCodeFence(it)) },
+                onFailure = { _organizeState.value = OrganizeState.Failed(it.message ?: "Organize failed") }
+            )
+        }
+    }
+
+    /** Replace the note with the proposal (undoable via [undo]) and autosave. */
+    fun applyOrganized(activity: Activity) {
+        val ready = _organizeState.value as? OrganizeState.Ready ?: return
+        val current = _textFieldValue.value
+        pushHistory(current)
+        _textFieldValue.value = TextFieldValue(ready.organized, TextRange(ready.organized.length))
+        _organizeState.value = OrganizeState.Idle
+        scheduleAutosave(activity)
+    }
+
+    fun dismissOrganize() {
+        _organizeState.value = OrganizeState.Idle
+    }
+
+    /** Models sometimes wrap the whole reply in a ```markdown fence despite being told not to. */
+    private fun stripCodeFence(reply: String): String {
+        val trimmed = reply.trim()
+        val fence = Regex("""^```[a-zA-Z]*\n([\s\S]*?)\n```$""").find(trimmed)
+        return fence?.groupValues?.get(1) ?: trimmed
     }
 
     /**

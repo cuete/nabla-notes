@@ -19,4 +19,7 @@ import com.nabla.voice.TranscriptEntry
  */
 interface Summarizer {
     suspend fun summarize(transcript: List<TranscriptEntry>, notes: String): Result<String>
+
+    /** AI cleanup/reorganization of a note's markdown; returns the full reorganized text. */
+    suspend fun organize(content: String): Result<String>
 }

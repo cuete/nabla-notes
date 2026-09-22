@@ -11,6 +11,7 @@ import com.nabla.voice.TranscriptionService
 import io.mockk.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.*
@@ -129,6 +130,7 @@ class DictationViewModelTest {
         every { mockService.transcriptEntries } returns MutableStateFlow(existingEntries)
         every { mockService.isRecording } returns MutableStateFlow(true)
         every { mockService.error } returns MutableSharedFlow()
+        every { mockService.inlineUtterances } returns MutableSharedFlow()
 
         val binder = mockk<TranscriptionService.TranscriptionBinder>()
         every { binder.getService() } returns mockService
@@ -144,6 +146,35 @@ class DictationViewModelTest {
 
         assertEquals(DictationSessionState.Recording, reattached.state.value)
         assertEquals(existingEntries, reattached.transcriptEntries.value)
+    }
+
+    @Test
+    fun `inline utterances are forwarded on their own flow and never enter the transcript`() = kotlinx.coroutines.test.runTest(testDispatcher) {
+        val inline = MutableSharedFlow<String>(extraBufferCapacity = 8)
+        val mockService = mockk<TranscriptionService>(relaxed = true)
+        every { mockService.transcriptEntries } returns MutableStateFlow(emptyList())
+        every { mockService.isRecording } returns MutableStateFlow(true)
+        every { mockService.error } returns MutableSharedFlow()
+        every { mockService.inlineUtterances } returns inline
+
+        val binder = mockk<TranscriptionService.TranscriptionBinder>()
+        every { binder.getService() } returns mockService
+        every { context.bindService(any(), any(), 0) } answers {
+            secondArg<ServiceConnection>().onServiceConnected(mockk(relaxed = true), binder)
+            true
+        }
+
+        val vm = DictationViewModel(context, dictationRepository, oneDriveRepository, summarizer)
+        val received = mutableListOf<String>()
+        val job = launch { vm.inlineUtterances.collect { received.add(it) } }
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        inline.emit("hello inline")
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        assertEquals(listOf("hello inline"), received)
+        assertEquals(emptyList<TranscriptEntry>(), vm.transcriptEntries.value)
+        job.cancel()
     }
 
     @Test
@@ -282,6 +313,7 @@ class DictationViewModelTest {
         every { mockService.transcriptEntries } returns MutableStateFlow(listOf(TranscriptEntry("10:00:01", "You", "hi")))
         every { mockService.isRecording } returns MutableStateFlow(true)
         every { mockService.error } returns MutableSharedFlow()
+        every { mockService.inlineUtterances } returns MutableSharedFlow()
         val binder = mockk<TranscriptionService.TranscriptionBinder>()
         every { binder.getService() } returns mockService
         every { context.bindService(any(), any(), 0) } answers {
@@ -310,6 +342,7 @@ class DictationViewModelTest {
         every { mockService.transcriptEntries } returns MutableStateFlow(entries)
         every { mockService.isRecording } returns MutableStateFlow(true)
         every { mockService.error } returns MutableSharedFlow()
+        every { mockService.inlineUtterances } returns MutableSharedFlow()
         val binder = mockk<TranscriptionService.TranscriptionBinder>()
         every { binder.getService() } returns mockService
         every { context.bindService(any(), any(), 0) } answers {
