@@ -51,9 +51,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -340,9 +337,9 @@ fun FileBrowserScreen(
     if (showCreateDialog) {
         CreateFileDialog(
             onDismiss = { showCreateDialog = false },
-            onCreate = { name, isMarkdown ->
+            onCreate = { name ->
                 showCreateDialog = false
-                viewModel.createFile(name, isMarkdown, activity) { newFile ->
+                viewModel.createFile(name, activity) { newFile ->
                     onFileSelected(newFile)
                 }
             }
@@ -685,13 +682,12 @@ private fun formatDate(iso8601: String): String {
 @Composable
 private fun CreateFileDialog(
     onDismiss: () -> Unit,
-    onCreate: (name: String, isMarkdown: Boolean) -> Unit
+    onCreate: (name: String) -> Unit
 ) {
     var fileName by remember {
         val today = java.time.LocalDate.now().toString() // YYYY-MM-DD
         mutableStateOf("${today}_Note")
     }
-    var isMarkdown by remember { mutableStateOf(false) }
     var nameError by remember { mutableStateOf(false) }
 
     AlertDialog(
@@ -709,33 +705,12 @@ private fun CreateFileDialog(
                     isError = nameError,
                     supportingText = if (nameError) {
                         { Text("Name cannot be empty") }
-                    } else null,
+                    } else {
+                        { Text("Creates a .md file") }
+                    },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
-
-                Text(
-                    text = "File type",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-
-                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                    SegmentedButton(
-                        selected = !isMarkdown,
-                        onClick = { isMarkdown = false },
-                        shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2)
-                    ) {
-                        Text(".txt")
-                    }
-                    SegmentedButton(
-                        selected = isMarkdown,
-                        onClick = { isMarkdown = true },
-                        shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2)
-                    ) {
-                        Text(".md")
-                    }
-                }
             }
         },
         confirmButton = {
@@ -744,7 +719,7 @@ private fun CreateFileDialog(
                     if (fileName.isBlank()) {
                         nameError = true
                     } else {
-                        onCreate(fileName.trim(), isMarkdown)
+                        onCreate(fileName.trim())
                     }
                 }
             ) {
