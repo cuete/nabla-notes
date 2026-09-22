@@ -45,6 +45,9 @@ class OneDriveRepository @Inject constructor(
 
         // Text media type for file content uploads
         private val TEXT_PLAIN = "text/plain; charset=utf-8".toMediaType()
+
+        // JSON media type for PATCH requests (move/rename)
+        private val APPLICATION_JSON = "application/json; charset=utf-8".toMediaType()
     }
 
     // ─── File listing ───────────────────────────────────────────────────────────
@@ -380,7 +383,9 @@ class OneDriveRepository @Inject constructor(
             val newFile = NoteFile(
                 id = json.getString("id"),
                 name = json.getString("name"),
-                lastModified = json.optString("lastModifiedDateTime", "")
+                lastModified = json.optString("lastModifiedDateTime", ""),
+                parentFolderId = json.optJSONObject("parentReference")?.optString("id"),
+                parentPath = folderPath
             )
             Log.d(TAG, "File created: ${newFile.name} (${newFile.id})")
             Result.success(newFile)
@@ -640,6 +645,88 @@ class OneDriveRepository @Inject constructor(
             }
         } catch (e: Exception) {
             Log.e(TAG, "deleteFile exception", e)
+            Result.failure(e)
+        }
+    }
+
+    // ─── Move / rename ───────────────────────────────────────────────────────────
+
+    /**
+     * Move a file into a different folder via Graph's `parentReference` PATCH.
+     *
+     * @param fileId          OneDrive item ID of the file being moved.
+     * @param destFolderId    OneDrive item ID of the destination folder, or "root".
+     * @param activity        Required for interactive auth fallback.
+     */
+    suspend fun moveItem(
+        fileId: String,
+        destFolderId: String,
+        activity: Activity
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val token = msalManager.acquireToken(activity).getOrElse { e ->
+                return@withContext Result.failure(e)
+            }
+            val url = "$GRAPH_BASE/me/drive/items/$fileId"
+            val json = JSONObject().apply {
+                put("parentReference", JSONObject().apply { put("id", destFolderId) })
+            }
+            val body = json.toString().toRequestBody(APPLICATION_JSON)
+            val request = Request.Builder()
+                .url(url)
+                .addHeader("Authorization", "Bearer $token")
+                .patch(body)
+                .build()
+
+            Log.d(TAG, "Moving item $fileId to folder $destFolderId")
+            val response = httpClient.newCall(request).execute()
+            if (!response.isSuccessful) {
+                val errBody = response.body?.string() ?: ""
+                Log.e(TAG, "Move failed: ${response.code} $errBody")
+                return@withContext Result.failure(IOException("Move failed: ${response.code}"))
+            }
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Log.e(TAG, "moveItem exception", e)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Rename a file in place via Graph's `name` PATCH.
+     *
+     * @param fileId    OneDrive item ID of the file being renamed.
+     * @param newName   New file name, including extension.
+     * @param activity  Required for interactive auth fallback.
+     */
+    suspend fun renameItem(
+        fileId: String,
+        newName: String,
+        activity: Activity
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val token = msalManager.acquireToken(activity).getOrElse { e ->
+                return@withContext Result.failure(e)
+            }
+            val url = "$GRAPH_BASE/me/drive/items/$fileId"
+            val json = JSONObject().apply { put("name", newName) }
+            val body = json.toString().toRequestBody(APPLICATION_JSON)
+            val request = Request.Builder()
+                .url(url)
+                .addHeader("Authorization", "Bearer $token")
+                .patch(body)
+                .build()
+
+            Log.d(TAG, "Renaming item $fileId to $newName")
+            val response = httpClient.newCall(request).execute()
+            if (!response.isSuccessful) {
+                val errBody = response.body?.string() ?: ""
+                Log.e(TAG, "Rename failed: ${response.code} $errBody")
+                return@withContext Result.failure(IOException("Rename failed: ${response.code}"))
+            }
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Log.e(TAG, "renameItem exception", e)
             Result.failure(e)
         }
     }
