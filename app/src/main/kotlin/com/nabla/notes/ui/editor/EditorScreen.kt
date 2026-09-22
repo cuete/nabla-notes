@@ -48,7 +48,10 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.ZoomIn
@@ -67,6 +70,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TextField
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -91,6 +95,9 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.TextRange
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -136,6 +143,11 @@ import io.noties.markwon.html.TagHandler
 import io.noties.markwon.image.glide.GlideImagesPlugin
 import io.noties.markwon.linkify.LinkifyPlugin
 import java.util.concurrent.atomic.AtomicInteger
+
+// ── Find in note ──────────────────────────────────────────────────────────────
+
+/** [token] makes repeat requests to the same [offset] (e.g. re-pressing next on a lone match) distinct. */
+private data class ScrollRequest(val offset: Int, val token: Int)
 
 // ── Markdown segment model ────────────────────────────────────────────────────
 
@@ -185,6 +197,33 @@ fun EditorScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val coroutineScope = rememberCoroutineScope()
     var showInsertImageSheet by remember { mutableStateOf(false) }
+
+    // ── Find in note (P2) ────────────────────────────────────────────────────────
+    var showSearch by remember { mutableStateOf(false) }
+    var searchQuery by remember { mutableStateOf("") }
+    var currentMatchIndex by remember { mutableStateOf(0) }
+    var scrollRequest by remember { mutableStateOf<ScrollRequest?>(null) }
+    val searchMatches = remember(textFieldValue.text, searchQuery) {
+        if (searchQuery.isBlank()) emptyList()
+        else Regex(Regex.escape(searchQuery), RegexOption.IGNORE_CASE)
+            .findAll(textFieldValue.text)
+            .map { it.range.first }
+            .toList()
+    }
+
+    fun jumpToMatch(index: Int) {
+        if (searchMatches.isEmpty()) return
+        val clamped = index.mod(searchMatches.size)
+        currentMatchIndex = clamped
+        val offset = searchMatches[clamped]
+        viewModel.setSelection(TextRange(offset, offset + searchQuery.length))
+        scrollRequest = ScrollRequest(offset, (scrollRequest?.token ?: 0) + 1)
+    }
+
+    // Jump to the first match whenever the query (or the underlying text) changes.
+    LaunchedEffect(searchQuery, textFieldValue.text) {
+        if (searchQuery.isNotBlank() && searchMatches.isNotEmpty()) jumpToMatch(0)
+    }
 
     // Force a save when the app is minimized and when this screen leaves composition (back,
     // file switch) instead of waiting out the autosave debounce.
@@ -304,68 +343,93 @@ fun EditorScreen(
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = {
-                    Text(
-                        text = titleText,
-                        maxLines = 1,
-                        style = MaterialTheme.typography.titleMedium
+            Column {
+                TopAppBar(
+                    title = {
+                        Text(
+                            text = titleText,
+                            maxLines = 1,
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                    },
+                    navigationIcon = {
+                        if (showBack) {
+                            IconButton(onClick = onBackClick) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                    contentDescription = "Back"
+                                )
+                            }
+                        }
+                    },
+                    actions = {
+                        // Dictate at cursor — only in edit mode; dictating into a read-only preview
+                        // has nowhere to insert.
+                        if (!isMarkdownPreview) {
+                            val recording = dictationState is DictationSessionState.Recording
+                            IconButton(onClick = { toggleDictation() }) {
+                                Icon(
+                                    imageVector = if (recording) Icons.Filled.Stop else Icons.Filled.Mic,
+                                    contentDescription = if (recording) "Stop dictating" else "Dictate",
+                                    tint = if (recording) MaterialTheme.colorScheme.error else LocalContentColor.current
+                                )
+                            }
+                        }
+                        // Font size zoom — only meaningful while editing raw text.
+                        if (!isMarkdownPreview) {
+                            IconButton(onClick = { viewModel.decreaseFontSize() }) {
+                                Icon(Icons.Filled.ZoomOut, contentDescription = "Decrease text size")
+                            }
+                            IconButton(onClick = { viewModel.increaseFontSize() }) {
+                                Icon(Icons.Filled.ZoomIn, contentDescription = "Increase text size")
+                            }
+                        }
+                        // Find in note — raw-text search; switches out of preview so matches
+                        // can be highlighted and scrolled to.
+                        IconButton(onClick = {
+                            if (!showSearch && isMarkdownPreview) viewModel.toggleMarkdownPreview()
+                            showSearch = !showSearch
+                            if (!showSearch) searchQuery = ""
+                        }) {
+                            Icon(
+                                imageVector = if (showSearch) Icons.Filled.Close else Icons.Filled.Search,
+                                contentDescription = if (showSearch) "Close search" else "Find in note"
+                            )
+                        }
+                        // Organize — AI cleanup of the whole note; shows a proposal to Apply/Discard.
+                        IconButton(
+                            onClick = { viewModel.organize() },
+                            enabled = organizeState !is OrganizeState.Working && textFieldValue.text.isNotBlank()
+                        ) {
+                            if (organizeState is OrganizeState.Working) {
+                                CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                            } else {
+                                Icon(Icons.Filled.AutoFixHigh, contentDescription = "Organize")
+                            }
+                        }
+                        // Toggle preview / edit mode (only for .md files or when in preview)
+                        if (noteFile.isMarkdown || isMarkdownPreview) {
+                            IconButton(onClick = { viewModel.toggleMarkdownPreview() }) {
+                                Icon(
+                                    imageVector = if (isMarkdownPreview) Icons.Filled.Edit else Icons.Filled.Visibility,
+                                    contentDescription = if (isMarkdownPreview) "Edit" else "Preview"
+                                )
+                            }
+                        }
+                    }
+                )
+                if (showSearch) {
+                    SearchBar(
+                        query = searchQuery,
+                        onQueryChange = { searchQuery = it },
+                        matchCount = searchMatches.size,
+                        currentIndex = currentMatchIndex,
+                        onNext = { jumpToMatch(currentMatchIndex + 1) },
+                        onPrevious = { jumpToMatch(currentMatchIndex - 1) },
+                        onClose = { showSearch = false; searchQuery = "" }
                     )
-                },
-                navigationIcon = {
-                    if (showBack) {
-                        IconButton(onClick = onBackClick) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                                contentDescription = "Back"
-                            )
-                        }
-                    }
-                },
-                actions = {
-                    // Dictate at cursor — only in edit mode; dictating into a read-only preview
-                    // has nowhere to insert.
-                    if (!isMarkdownPreview) {
-                        val recording = dictationState is DictationSessionState.Recording
-                        IconButton(onClick = { toggleDictation() }) {
-                            Icon(
-                                imageVector = if (recording) Icons.Filled.Stop else Icons.Filled.Mic,
-                                contentDescription = if (recording) "Stop dictating" else "Dictate",
-                                tint = if (recording) MaterialTheme.colorScheme.error else LocalContentColor.current
-                            )
-                        }
-                    }
-                    // Font size zoom — only meaningful while editing raw text.
-                    if (!isMarkdownPreview) {
-                        IconButton(onClick = { viewModel.decreaseFontSize() }) {
-                            Icon(Icons.Filled.ZoomOut, contentDescription = "Decrease text size")
-                        }
-                        IconButton(onClick = { viewModel.increaseFontSize() }) {
-                            Icon(Icons.Filled.ZoomIn, contentDescription = "Increase text size")
-                        }
-                    }
-                    // Organize — AI cleanup of the whole note; shows a proposal to Apply/Discard.
-                    IconButton(
-                        onClick = { viewModel.organize() },
-                        enabled = organizeState !is OrganizeState.Working && textFieldValue.text.isNotBlank()
-                    ) {
-                        if (organizeState is OrganizeState.Working) {
-                            CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-                        } else {
-                            Icon(Icons.Filled.AutoFixHigh, contentDescription = "Organize")
-                        }
-                    }
-                    // Toggle preview / edit mode (only for .md files or when in preview)
-                    if (noteFile.isMarkdown || isMarkdownPreview) {
-                        IconButton(onClick = { viewModel.toggleMarkdownPreview() }) {
-                            Icon(
-                                imageVector = if (isMarkdownPreview) Icons.Filled.Edit else Icons.Filled.Visibility,
-                                contentDescription = if (isMarkdownPreview) "Edit" else "Preview"
-                            )
-                        }
-                    }
                 }
-            )
+            }
         },
         snackbarHost = { SnackbarHost(snackbarHostState, modifier = Modifier.navigationBarsPadding()) },
         contentWindowInsets = androidx.compose.foundation.layout.WindowInsets(0)
@@ -413,6 +477,7 @@ fun EditorScreen(
                                 onValueChange = { viewModel.updateTextFieldValue(it, activity) },
                                 focusRequester = editorFocusRequester,
                                 fontSize = fontSize,
+                                scrollRequest = scrollRequest,
                                 modifier = Modifier
                                     .weight(1f)
                                     .background(MaterialTheme.colorScheme.surface)
@@ -647,13 +712,29 @@ private fun NoteEditor(
     onValueChange: (TextFieldValue) -> Unit,
     focusRequester: FocusRequester,
     fontSize: Float,
+    scrollRequest: ScrollRequest? = null,
     modifier: Modifier = Modifier
 ) {
     val scrollState = rememberScrollState()
+    var layoutResult by remember { mutableStateOf<TextLayoutResult?>(null) }
+    val density = LocalDensity.current
+
+    // Scroll to a find-in-note match. Re-keyed on layoutResult too, since a request that lands
+    // before the field has laid out its (possibly just-changed) text would otherwise be dropped.
+    LaunchedEffect(scrollRequest, layoutResult) {
+        val request = scrollRequest ?: return@LaunchedEffect
+        val layout = layoutResult ?: return@LaunchedEffect
+        val safeOffset = request.offset.coerceIn(0, layout.layoutInput.text.length)
+        val marginPx = with(density) { 64.dp.toPx() }
+        val targetY = (layout.getBoundingBox(safeOffset).top - marginPx)
+            .coerceIn(0f, scrollState.maxValue.toFloat())
+        scrollState.animateScrollTo(targetY.toInt())
+    }
 
     BasicTextField(
         value = textFieldValue,
         onValueChange = onValueChange,
+        onTextLayout = { layoutResult = it },
         // Fix: fillMaxSize() ensures the tappable area covers the full viewport so tapping
         // past the last character on any line still hits the field and places the cursor.
         modifier = modifier
@@ -681,6 +762,56 @@ private fun NoteEditor(
             innerTextField()
         }
     )
+}
+
+// ── Find-in-note Search Bar ───────────────────────────────────────────────────
+
+@Composable
+private fun SearchBar(
+    query: String,
+    onQueryChange: (String) -> Unit,
+    matchCount: Int,
+    currentIndex: Int,
+    onNext: () -> Unit,
+    onPrevious: () -> Unit,
+    onClose: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val focusRequester = remember { FocusRequester() }
+    LaunchedEffect(Unit) { runCatching { focusRequester.requestFocus() } }
+
+    Surface(modifier = modifier.fillMaxWidth(), tonalElevation = 2.dp) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            TextField(
+                value = query,
+                onValueChange = onQueryChange,
+                modifier = Modifier
+                    .weight(1f)
+                    .focusRequester(focusRequester),
+                singleLine = true,
+                placeholder = { Text("Find in note") }
+            )
+            Text(
+                text = if (matchCount == 0) "0/0" else "${currentIndex + 1}/$matchCount",
+                style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.padding(horizontal = 8.dp)
+            )
+            IconButton(onClick = onPrevious, enabled = matchCount > 0) {
+                Icon(Icons.Filled.KeyboardArrowUp, contentDescription = "Previous match")
+            }
+            IconButton(onClick = onNext, enabled = matchCount > 0) {
+                Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "Next match")
+            }
+            IconButton(onClick = onClose) {
+                Icon(Icons.Filled.Close, contentDescription = "Close search")
+            }
+        }
+    }
 }
 
 // ── Markdown Toolbar ──────────────────────────────────────────────────────────

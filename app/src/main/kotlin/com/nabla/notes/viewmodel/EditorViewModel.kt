@@ -241,6 +241,14 @@ class EditorViewModel @Inject constructor(
     }
 
     /**
+     * Move the cursor/selection without touching undo history or scheduling an autosave — used
+     * by find-in-note navigation to jump to a match without counting as an edit.
+     */
+    fun setSelection(range: TextRange) {
+        _textFieldValue.value = _textFieldValue.value.copy(selection = range)
+    }
+
+    /**
      * Called by BasicTextField on every keystroke to update text + cursor/selection.
      * Schedules a debounced autosave 2 seconds after the last keystroke.
      */
