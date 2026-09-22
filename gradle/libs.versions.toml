@@ -1,18 +1,21 @@
 [versions]
-agp = "8.7.3"
-kotlin = "2.0.21"
-coreKtx = "1.13.1"
-lifecycle = "2.8.4"
-activityCompose = "1.9.0"
-composeBom = "2024.09.00"
-navigationCompose = "2.8.3"
-hilt = "2.51.1"
-hiltNavCompose = "1.2.0"
+agp = "9.4.0"
+kotlin = "2.4.20"
+ksp = "2.3.12"
+coreKtx = "1.19.0"
+lifecycle = "2.11.0"
+activityCompose = "1.13.0"
+composeBom = "2026.09.00"
+navigationCompose = "2.10.1"
+hilt = "2.60.1"
+hiltNavCompose = "1.4.0"
 coroutines = "1.9.0"
-msal = "5.2.0"
+msal = "8.4.2"
 okhttp = "4.12.0"
 markwon = "4.6.2"
-datastore = "1.1.1"
+datastore = "1.2.1"
+gson = "2.14.0"
+azureSpeech = "1.51.2"
 
 [libraries]
 # AndroidX core
@@ -67,9 +70,17 @@ markwon-html = { group = "io.noties.markwon", name = "html", version.ref = "mark
 # DataStore (persistent settings)
 datastore-preferences = { group = "androidx.datastore", name = "datastore-preferences", version.ref = "datastore" }
 
+# JSON (used directly by MainActivity/TrackerPopupActivity for nav-arg encoding;
+# was previously only a transitive, compile-scope dependency of MSAL — MSAL 8.x
+# marks it runtime-scope, so it now needs to be declared)
+gson = { group = "com.google.code.gson", name = "gson", version.ref = "gson" }
+
+# Azure Cognitive Services Speech SDK — used only by the :voice module
+azure-speech = { group = "com.microsoft.cognitiveservices.speech", name = "client-sdk", version.ref = "azureSpeech" }
+
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
-kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+android-library = { id = "com.android.library", version.ref = "agp" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
-kotlin-kapt = { id = "org.jetbrains.kotlin.kapt", version.ref = "kotlin" }
+ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
 hilt = { id = "com.google.dagger.hilt.android", version.ref = "hilt" }

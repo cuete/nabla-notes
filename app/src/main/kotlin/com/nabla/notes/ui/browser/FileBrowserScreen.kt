@@ -11,12 +11,15 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
@@ -26,6 +29,8 @@ import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.InsertDriveFile
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
@@ -34,6 +39,8 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
@@ -69,6 +76,7 @@ import com.nabla.notes.model.FolderItem
 import com.nabla.notes.model.NoteFile
 import com.nabla.notes.viewmodel.BrowserUiState
 import com.nabla.notes.viewmodel.BrowserViewModel
+import com.nabla.notes.viewmodel.MoveUiState
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -79,7 +87,8 @@ import java.time.format.FormatStyle
 fun FileBrowserScreen(
     viewModel: BrowserViewModel,
     onFileSelected: (NoteFile) -> Unit,
-    onSettingsClick: () -> Unit
+    onSettingsClick: () -> Unit,
+    onDictateClick: (folderPath: String) -> Unit = {}
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val currentPath by viewModel.currentPath.collectAsState()
@@ -93,6 +102,8 @@ fun FileBrowserScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     var showCreateDialog by remember { mutableStateOf(false) }
     var fileToDelete by remember { mutableStateOf<NoteFile?>(null) }
+    var fileToRename by remember { mutableStateOf<NoteFile?>(null) }
+    var fileToMove by remember { mutableStateOf<NoteFile?>(null) }
 
     // Trigger initial load
     LaunchedEffect(Unit) {
@@ -121,6 +132,12 @@ fun FileBrowserScreen(
                     }
                 },
                 actions = {
+                    IconButton(onClick = { onDictateClick(viewModel.currentFolderPath()) }) {
+                        Icon(
+                            imageVector = Icons.Filled.Mic,
+                            contentDescription = "Dictate"
+                        )
+                    }
                     IconButton(onClick = onSettingsClick) {
                         Icon(
                             imageVector = Icons.Filled.Settings,
@@ -251,6 +268,11 @@ fun FileBrowserScreen(
                                     is BrowserEntry.File -> NoteFileCard(
                                         noteFile = entry.note,
                                         onClick = { onFileSelected(entry.note) },
+                                        onRenameClick = { fileToRename = entry.note },
+                                        onMoveClick = {
+                                            fileToMove = entry.note
+                                            viewModel.startMove(entry.note, activity)
+                                        },
                                         onDeleteClick = { fileToDelete = entry.note }
                                     )
                                 }
@@ -322,6 +344,41 @@ fun FileBrowserScreen(
             }
         )
     }
+
+    // Rename dialog
+    fileToRename?.let { file ->
+        RenameFileDialog(
+            currentName = file.name,
+            onDismiss = { fileToRename = null },
+            onRename = { newName ->
+                viewModel.renameFile(file, newName, activity)
+                fileToRename = null
+            }
+        )
+    }
+
+    // Move-to-folder dialog
+    fileToMove?.let { file ->
+        val moveUiState by viewModel.moveUiState.collectAsState()
+        val moveFolderStack by viewModel.moveFolderStack.collectAsState()
+        // Move succeeded (or was cancelled) elsewhere and reset the ViewModel's state to
+        // Hidden — dismiss the local dialog toggle to match.
+        LaunchedEffect(moveUiState) {
+            if (moveUiState is MoveUiState.Hidden) fileToMove = null
+        }
+        MoveFileDialog(
+            file = file,
+            uiState = moveUiState,
+            folderStack = moveFolderStack,
+            onNavigateInto = { id, name -> viewModel.moveNavigateInto(file, id, name, activity) },
+            onNavigateUp = { viewModel.moveNavigateUp(file, activity) },
+            onConfirmMove = { viewModel.confirmMove(file, activity) },
+            onDismiss = {
+                viewModel.cancelMove()
+                fileToMove = null
+            }
+        )
+    }
 }
 
 // ─── File Card ────────────────────────────────────────────────────────────────
@@ -368,6 +425,8 @@ private fun FolderEntryCard(folder: FolderItem, onClick: () -> Unit) {
 private fun NoteFileCard(
     noteFile: NoteFile,
     onClick: () -> Unit,
+    onRenameClick: () -> Unit,
+    onMoveClick: () -> Unit,
     onDeleteClick: () -> Unit
 ) {
     Card(
@@ -412,16 +471,176 @@ private fun NoteFileCard(
                     )
                 }
             }
-            // Trailing delete button
-            IconButton(onClick = onDeleteClick) {
-                Icon(
-                    imageVector = Icons.Filled.Delete,
-                    contentDescription = "Delete",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+            // Trailing overflow menu — rename / move / delete
+            var showMenu by remember { mutableStateOf(false) }
+            Box {
+                IconButton(onClick = { showMenu = true }) {
+                    Icon(
+                        imageVector = Icons.Filled.MoreVert,
+                        contentDescription = "More options",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Rename") },
+                        onClick = { showMenu = false; onRenameClick() }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Move") },
+                        onClick = { showMenu = false; onMoveClick() }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Delete") },
+                        onClick = { showMenu = false; onDeleteClick() }
+                    )
+                }
             }
         }
     }
+}
+
+// ─── Rename Dialog ────────────────────────────────────────────────────────────
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RenameFileDialog(
+    currentName: String,
+    onDismiss: () -> Unit,
+    onRename: (newName: String) -> Unit
+) {
+    var name by remember { mutableStateOf(currentName) }
+    var nameError by remember { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Rename file") },
+        text = {
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it; nameError = false },
+                label = { Text("File name") },
+                isError = nameError,
+                supportingText = if (nameError) {
+                    { Text("Name cannot be empty") }
+                } else null,
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    if (name.isBlank()) nameError = true else onRename(name.trim())
+                }
+            ) {
+                Text("Rename")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+
+// ─── Move Dialog ──────────────────────────────────────────────────────────────
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MoveFileDialog(
+    file: NoteFile,
+    uiState: MoveUiState,
+    folderStack: List<Pair<String, String>>,
+    onNavigateInto: (folderId: String, folderName: String) -> Unit,
+    onNavigateUp: () -> Unit,
+    onConfirmMove: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val currentPath = if (folderStack.isEmpty()) "OneDrive" else "OneDrive / " + folderStack.joinToString(" / ") { it.second }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Move \"${file.name}\"") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "📂 $currentPath",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary
+                )
+
+                if (folderStack.isNotEmpty()) {
+                    TextButton(onClick = onNavigateUp, modifier = Modifier.fillMaxWidth()) {
+                        Text(
+                            text = "↑ Go up",
+                            modifier = Modifier.fillMaxWidth(),
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                }
+
+                when (uiState) {
+                    is MoveUiState.Loading -> {
+                        Box(
+                            modifier = Modifier.fillMaxWidth().height(80.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CircularProgressIndicator()
+                        }
+                    }
+                    is MoveUiState.FolderPicker -> {
+                        if (uiState.folders.isEmpty()) {
+                            Text(
+                                text = "No subfolders here.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        } else {
+                            Column(
+                                modifier = Modifier
+                                    .heightIn(max = 320.dp)
+                                    .verticalScroll(rememberScrollState()),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                uiState.folders.sortedBy { it.first.lowercase() }.forEach { (name, id) ->
+                                    TextButton(
+                                        onClick = { onNavigateInto(id, name) },
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Text(
+                                            text = "📁  $name  ›",
+                                            modifier = Modifier.fillMaxWidth(),
+                                            style = MaterialTheme.typography.bodyMedium
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    is MoveUiState.Error -> {
+                        Text(
+                            text = "Failed to load folders: ${uiState.message}",
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                    is MoveUiState.Hidden -> Unit
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = onConfirmMove) {
+                Text("Move here")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
 }
 
 private fun formatDate(iso8601: String): String {

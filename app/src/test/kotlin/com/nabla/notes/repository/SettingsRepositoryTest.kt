@@ -1,47 +1,20 @@
 package com.nabla.notes.repository
 
-import androidx.datastore.core.DataStore
-import androidx.datastore.preferences.core.PreferenceDataStoreFactory
-import androidx.datastore.preferences.core.Preferences
-import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.test.TestScope
-import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
-import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
-import org.junit.Rule
 import org.junit.Test
-import org.junit.rules.TemporaryFolder
 
 /**
  * Unit tests for SettingsRepository folder stack persistence.
  *
- * DataStore needs its own TestScope that we cancel in teardown to avoid
- * UncompletedCoroutinesError from the internal background writer job.
+ * Uses [InMemoryPreferencesDataStore] rather than a real file-backed DataStore:
+ * the latter hits a longstanding upstream Windows bug on every write (see that
+ * class's doc comment) that has nothing to do with SettingsRepository's own logic.
  */
-@OptIn(ExperimentalCoroutinesApi::class)
 class SettingsRepositoryTest {
 
-    @get:Rule
-    val tmpFolder: TemporaryFolder = TemporaryFolder.builder().assureDeletion().build()
-
-    // Dedicated scope for DataStore — cancelled in teardown.
-    private val datastoreScope = TestScope(UnconfinedTestDispatcher())
-
-    private fun buildRepo(): SettingsRepository {
-        val dataStore: DataStore<Preferences> = PreferenceDataStoreFactory.create(
-            scope = datastoreScope,
-            produceFile = { tmpFolder.newFile("prefs_${System.nanoTime()}.preferences_pb") }
-        )
-        return SettingsRepository(dataStore)
-    }
-
-    @After
-    fun teardown() {
-        datastoreScope.cancel()
-    }
+    private fun buildRepo(): SettingsRepository = SettingsRepository(InMemoryPreferencesDataStore())
 
     @Test
     fun `saveLastFolderStack and loadLastFolderStack round-trip single entry`() = runTest {

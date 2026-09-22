@@ -31,6 +31,14 @@ sealed class BrowserUiState {
     data class Error(val message: String) : BrowserUiState()
 }
 
+/** UI state for the "Move to folder" dialog, driven by its own folder navigation stack. */
+sealed class MoveUiState {
+    object Hidden : MoveUiState()
+    data class Loading(val file: NoteFile) : MoveUiState()
+    data class FolderPicker(val file: NoteFile, val folders: List<Pair<String, String>>) : MoveUiState()
+    data class Error(val file: NoteFile, val message: String) : MoveUiState()
+}
+
 /**
  * ViewModel for the file browser.
  *
@@ -161,7 +169,7 @@ class BrowserViewModel @Inject constructor(
      * OneDrive-root-relative path of the folder currently being browsed, combining the
      * configured root folder path with any subfolder stack navigation.
      */
-    private fun currentFolderPath(): String {
+    fun currentFolderPath(): String {
         val base = settings.value.folderPath
         if (_folderStack.value.isEmpty()) return base
         val subPath = _folderStack.value.joinToString("/") { it.second }
@@ -256,5 +264,76 @@ class BrowserViewModel @Inject constructor(
                 }
             )
         }
+    }
+
+    /**
+     * Rename a file in place, then refresh the file list.
+     */
+    fun renameFile(noteFile: NoteFile, newName: String, activity: Activity) {
+        viewModelScope.launch {
+            oneDriveRepository.renameItem(noteFile.id, newName, activity).fold(
+                onSuccess = { loadFiles(activity) },
+                onFailure = { e ->
+                    _uiState.value = BrowserUiState.Error("Rename failed: ${e.message}")
+                }
+            )
+        }
+    }
+
+    // ─── Move dialog ─────────────────────────────────────────────────────────────
+
+    private val _moveFolderStack = MutableStateFlow<List<Pair<String, String>>>(emptyList())
+    val moveFolderStack: StateFlow<List<Pair<String, String>>> = _moveFolderStack.asStateFlow()
+
+    private val _moveUiState = MutableStateFlow<MoveUiState>(MoveUiState.Hidden)
+    val moveUiState: StateFlow<MoveUiState> = _moveUiState.asStateFlow()
+
+    /** Open the move dialog for [file], starting navigation at the drive root. */
+    fun startMove(file: NoteFile, activity: Activity) {
+        _moveFolderStack.value = emptyList()
+        loadMoveFolders(file, "root", activity)
+    }
+
+    /** Navigate into a subfolder within the move dialog. */
+    fun moveNavigateInto(file: NoteFile, folderId: String, folderName: String, activity: Activity) {
+        _moveFolderStack.value = _moveFolderStack.value + (folderId to folderName)
+        loadMoveFolders(file, folderId, activity)
+    }
+
+    /** Navigate up one level within the move dialog. */
+    fun moveNavigateUp(file: NoteFile, activity: Activity) {
+        val stack = _moveFolderStack.value.dropLast(1)
+        _moveFolderStack.value = stack
+        loadMoveFolders(file, stack.lastOrNull()?.first ?: "root", activity)
+    }
+
+    private fun loadMoveFolders(file: NoteFile, parentId: String, activity: Activity) {
+        _moveUiState.value = MoveUiState.Loading(file)
+        viewModelScope.launch {
+            oneDriveRepository.listFolders(parentId, activity).fold(
+                onSuccess = { folders -> _moveUiState.value = MoveUiState.FolderPicker(file, folders) },
+                onFailure = { e -> _moveUiState.value = MoveUiState.Error(file, e.message ?: "Failed") }
+            )
+        }
+    }
+
+    /** Confirm the move into whatever folder the dialog is currently browsing. */
+    fun confirmMove(file: NoteFile, activity: Activity) {
+        val destFolderId = _moveFolderStack.value.lastOrNull()?.first ?: "root"
+        viewModelScope.launch {
+            oneDriveRepository.moveItem(file.id, destFolderId, activity).fold(
+                onSuccess = {
+                    cancelMove()
+                    loadFiles(activity)
+                },
+                onFailure = { e -> _moveUiState.value = MoveUiState.Error(file, e.message ?: "Move failed") }
+            )
+        }
+    }
+
+    /** Dismiss the move dialog and reset its navigation state. */
+    fun cancelMove() {
+        _moveUiState.value = MoveUiState.Hidden
+        _moveFolderStack.value = emptyList()
     }
 }
