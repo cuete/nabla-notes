@@ -6,11 +6,13 @@ import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import com.nabla.notes.model.NoteFile
 import com.nabla.notes.repository.OneDriveRepository
+import com.nabla.notes.repository.SettingsRepository
 import com.nabla.notes.summarizer.Summarizer
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -33,13 +35,16 @@ class EditorViewModelTest {
     private val context = mockk<Context>(relaxed = true)
     private val oneDriveRepository = mockk<OneDriveRepository>(relaxed = true)
     private val summarizer = mockk<Summarizer>(relaxed = true)
+    private val settingsRepository = mockk<SettingsRepository>(relaxed = true) {
+        every { editorFontSize } returns flowOf(SettingsRepository.DEFAULT_EDITOR_FONT_SIZE)
+    }
     private val activity = mockk<Activity>(relaxed = true)
     private lateinit var viewModel: EditorViewModel
 
     @Before
     fun setup() {
         Dispatchers.setMain(testDispatcher)
-        viewModel = EditorViewModel(context, oneDriveRepository, summarizer)
+        viewModel = EditorViewModel(context, oneDriveRepository, summarizer, settingsRepository)
         viewModel.setContent("hello world")
     }
 
