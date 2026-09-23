@@ -401,9 +401,14 @@ fun EditorScreen(
                             enabled = organizeState !is OrganizeState.Working && textFieldValue.text.isNotBlank()
                         ) {
                             if (organizeState is OrganizeState.Working) {
-                                CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                                CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
                             } else {
-                                Icon(Icons.Filled.AutoFixHigh, contentDescription = "Organize")
+                                Icon(
+                                    Icons.Filled.AutoFixHigh,
+                                    contentDescription = "Organize",
+                                    tint = MaterialTheme.colorScheme.tertiary,
+                                    modifier = Modifier.size(28.dp)
+                                )
                             }
                         }
                         // Toggle preview / edit mode (only for .md files or when in preview)
