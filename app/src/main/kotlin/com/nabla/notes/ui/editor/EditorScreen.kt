@@ -375,14 +375,13 @@ fun EditorScreen(
                                 )
                             }
                         }
-                        // Font size zoom — only meaningful while editing raw text.
-                        if (!isMarkdownPreview) {
-                            IconButton(onClick = { viewModel.decreaseFontSize() }) {
-                                Icon(Icons.Filled.ZoomOut, contentDescription = "Decrease text size")
-                            }
-                            IconButton(onClick = { viewModel.increaseFontSize() }) {
-                                Icon(Icons.Filled.ZoomIn, contentDescription = "Increase text size")
-                            }
+                        // Font size zoom — applies to raw text while editing and to the
+                        // rendered text in preview (shared setting, same persisted value).
+                        IconButton(onClick = { viewModel.decreaseFontSize() }) {
+                            Icon(Icons.Filled.ZoomOut, contentDescription = "Decrease text size")
+                        }
+                        IconButton(onClick = { viewModel.increaseFontSize() }) {
+                            Icon(Icons.Filled.ZoomIn, contentDescription = "Increase text size")
                         }
                         // Find in note — raw-text search; switches out of preview so matches
                         // can be highlighted and scrolled to.
@@ -462,6 +461,7 @@ fun EditorScreen(
                         if (isMarkdownPreview) {
                             MarkdownPreview(
                                 content = textFieldValue.text,
+                                fontSize = fontSize,
                                 onSaveToGallery = onSaveToGallery,
                                 onToggleTask = { ordinal -> viewModel.toggleTaskItem(ordinal, activity) },
                                 resolveContent = { text -> viewModel.resolveMediaLinks(text, activity) },
@@ -982,6 +982,7 @@ private fun InsertImageSheetThumbnail(
 @Composable
 private fun MarkdownPreview(
     content: String,
+    fontSize: Float,
     onSaveToGallery: (ByteArray) -> Unit,
     onToggleTask: (Int) -> Unit,
     resolveContent: suspend (String) -> String,
@@ -1070,10 +1071,10 @@ private fun MarkdownPreview(
                             factory = { ctx ->
                                 TextView(ctx).apply {
                                     setPadding(0, 0, 0, 0)
-                                    textSize = 15f
                                 }
                             },
                             update = { textView ->
+                                textView.textSize = fontSize
                                 // Set markdown first so Markwon's spans (including TaskListSpan) are
                                 // applied before setTextIsSelectable re-wraps the buffer. Calling
                                 // setTextIsSelectable before setText loses ReplacementSpan drawables.

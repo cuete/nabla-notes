@@ -21,12 +21,16 @@ private fun kindOf(name: String, mimeType: String?): FileKind = NoteFile(id = ""
 /**
  * Rewrites relative-path `![alt](dest)`/`[text](dest)` references in [content] so they resolve
  * against OneDrive:
- *  - image syntax → dest becomes a `data:` URI embedding the actual image bytes (fetched via the
- *    same authenticated [OneDriveRepository.downloadFileBytes] path the full-screen image/PDF
+ *  - image syntax → dest becomes a `data:` URI embedding a downsized preview thumbnail (fetched via
+ *    the same authenticated [OneDriveRepository.downloadFileBytes] path the full-screen image/PDF
  *    viewers already use successfully). This deliberately avoids depending on Graph's
  *    `@microsoft.graph.downloadUrl` — a pre-signed URL that GlideImagesPlugin would otherwise
  *    fetch unauthenticated and that proved unreliable in practice. Glide loads `data:` URIs
- *    natively, so no image-loading plugin changes are needed.
+ *    natively, so no image-loading plugin changes are needed. The image is additionally wrapped in
+ *    a synthetic `nablanote://` link to its own file id, so tapping the inline (thumbnail-quality)
+ *    preview opens the existing full-screen [com.nabla.notes.ui.viewer.ImageViewerScreen], which
+ *    downloads full-resolution bytes — reusing the same viewer/link-tap plumbing as note-to-note
+ *    links instead of building a second image viewer.
  *  - link syntax → dest becomes a synthetic `nablanote://` URI (see [buildNablaLinkUri]),
  *    intercepted at tap-time by [relativeLinkResolverPlugin] to open the in-app viewer
  *
@@ -63,10 +67,13 @@ suspend fun resolveRelativeMediaLinks(
         .filterNot { isExternalOrAbsolute(it) }
         .toSet()
 
-    // Images need actual bytes (embedded as a data: URI); links only need id/kind/name to navigate.
+    // Images need actual bytes (embedded as a data: URI) plus their file id (to link to the
+    // full-resolution viewer); links only need id/kind/name to navigate.
     // A "large" (~800px) server-generated thumbnail is plenty for inline preview and is far
     // smaller/faster than the full original — fall back to full bytes if no thumbnail exists yet.
-    val imageDataUris = imageDests.associateWith { dest ->
+    data class ResolvedImage(val dataUri: String, val id: String, val name: String)
+
+    val imageResolved = imageDests.associateWith { dest ->
         val meta = resolveMeta(dest) ?: return@associateWith null
         val thumbnailResult = oneDriveRepository.downloadThumbnailBytes(meta.id, "large", activity)
         val bytesResult = if (thumbnailResult.isSuccess) thumbnailResult
@@ -75,7 +82,7 @@ suspend fun resolveRelativeMediaLinks(
             onSuccess = { bytes ->
                 val mimeType = if (thumbnailResult.isSuccess) "image/jpeg" else (meta.mimeType ?: "image/jpeg")
                 val encoded = Base64.encodeToString(bytes, Base64.NO_WRAP)
-                "data:$mimeType;base64,$encoded"
+                ResolvedImage("data:$mimeType;base64,$encoded", meta.id, meta.name)
             },
             onFailure = { e ->
                 Log.w(TAG, "resolveRelativeMediaLinks: failed to download bytes for '$dest': ${e.message}")
@@ -87,8 +94,13 @@ suspend fun resolveRelativeMediaLinks(
 
     var result = MARKDOWN_IMAGE_REGEX.replace(content) { match ->
         val (alt, dest) = match.destructured
-        val dataUri = imageDataUris[dest]
-        if (dataUri != null) "![$alt]($dataUri)" else match.value
+        val image = imageResolved[dest]
+        if (image != null) {
+            val zoomUri = buildNablaLinkUri(image.id, FileKind.IMAGE, image.name)
+            "[![$alt](${image.dataUri})]($zoomUri)"
+        } else {
+            match.value
+        }
     }
 
     result = MARKDOWN_LINK_REGEX.replace(result) { match ->

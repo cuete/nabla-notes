@@ -202,20 +202,20 @@ class BrowserViewModel @Inject constructor(
 
     /**
      * Create a new file in the currently active folder (respects subfolder navigation).
+     * New files are always created as .md — the app is markdown-first; .txt is still readable
+     * for existing notes but is no longer offered on creation.
      *
-     * @param name     File name without extension (extension added based on [isMarkdown]).
-     * @param isMarkdown  If true, creates .md; otherwise .txt.
+     * @param name     File name without extension.
      * @param activity Activity for auth.
      * @param onCreated Callback with the new NoteFile on success.
      */
     fun createFile(
         name: String,
-        isMarkdown: Boolean,
         activity: Activity,
         onCreated: (NoteFile) -> Unit
     ) {
         viewModelScope.launch {
-            val extension = if (isMarkdown) ".md" else ".txt"
+            val extension = ".md"
             val fileName = if (name.endsWith(extension)) name else "$name$extension"
 
             oneDriveRepository.createFile(
