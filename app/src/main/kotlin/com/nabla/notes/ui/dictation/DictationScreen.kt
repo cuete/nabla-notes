@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -24,6 +25,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
@@ -165,7 +167,12 @@ fun DictationScreen(
                 actions = {
                     if (transcriptEntries.isNotEmpty() || typedNotes.isNotBlank()) {
                         IconButton(onClick = { showClearConfirm = true }) {
-                            Icon(Icons.Filled.Delete, contentDescription = "Clear transcript and notes")
+                            Icon(
+                                Icons.Filled.Delete,
+                                contentDescription = "Clear transcript and notes",
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(28.dp)
+                            )
                         }
                     }
                     IconButton(onClick = { showSettingsDialog = true }) {
@@ -208,9 +215,23 @@ fun DictationScreen(
                     }
                 }
                 val recording = state is DictationSessionState.Recording
-                Button(onClick = { if (recording) viewModel.stopSession() else startOrRequestPermission() }) {
-                    Icon(if (recording) Icons.Filled.Stop else Icons.Filled.Mic, contentDescription = null)
-                    Text(if (recording) "  Stop" else "  Start")
+                Button(
+                    onClick = { if (recording) viewModel.stopSession() else startOrRequestPermission() },
+                    modifier = Modifier.height(56.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (recording) MaterialTheme.colorScheme.error
+                            else MaterialTheme.colorScheme.primary
+                    )
+                ) {
+                    Icon(
+                        if (recording) Icons.Filled.Stop else Icons.Filled.Mic,
+                        contentDescription = null,
+                        modifier = Modifier.size(28.dp)
+                    )
+                    Text(
+                        if (recording) "  Stop" else "  Start",
+                        style = MaterialTheme.typography.titleMedium
+                    )
                 }
             }
 
